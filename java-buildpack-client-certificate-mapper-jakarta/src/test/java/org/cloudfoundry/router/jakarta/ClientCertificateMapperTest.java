@@ -268,4 +268,42 @@ public final class ClientCertificateMapperTest {
         assertThat(second).isSameAs(first);
     }
 
+    @Test
+    public void rawCacheHitSha256() throws IOException, ServletException, CertificateException {
+        // SHA-256 key (default): second request with same raw cert returns the same X509Certificate instance
+        this.request.addHeader(ClientCertificateMapper.HEADER, CERTIFICATE_1);
+        this.mapper.doFilter(this.request, this.response, this.filterChain);
+        X509Certificate first = ((X509Certificate[]) this.request.getAttribute(ClientCertificateMapper.ATTRIBUTE))[0];
+
+        MockHttpServletRequest request2 = new MockHttpServletRequest();
+        request2.addHeader(ClientCertificateMapper.HEADER, CERTIFICATE_1);
+        this.mapper.doFilter(request2, this.response, new MockFilterChain());
+        X509Certificate second = ((X509Certificate[]) request2.getAttribute(ClientCertificateMapper.ATTRIBUTE))[0];
+
+        assertThat(second).isSameAs(first);
+    }
+
+    @Test
+    public void rawCacheHitFullKey() throws IOException, ServletException, CertificateException {
+        // full key strategy: second request with same raw cert returns the same X509Certificate instance
+        System.setProperty("org.cloudfoundry.router.certificate.cache.raw.key", "full");
+        try {
+            ClientCertificateMapper mapper = new ClientCertificateMapper();
+
+            MockHttpServletRequest req1 = new MockHttpServletRequest();
+            req1.addHeader(ClientCertificateMapper.HEADER, CERTIFICATE_1);
+            mapper.doFilter(req1, this.response, new MockFilterChain());
+            X509Certificate first = ((X509Certificate[]) req1.getAttribute(ClientCertificateMapper.ATTRIBUTE))[0];
+
+            MockHttpServletRequest req2 = new MockHttpServletRequest();
+            req2.addHeader(ClientCertificateMapper.HEADER, CERTIFICATE_1);
+            mapper.doFilter(req2, this.response, new MockFilterChain());
+            X509Certificate second = ((X509Certificate[]) req2.getAttribute(ClientCertificateMapper.ATTRIBUTE))[0];
+
+            assertThat(second).isSameAs(first);
+        } finally {
+            System.clearProperty("org.cloudfoundry.router.certificate.cache.raw.key");
+        }
+    }
+
 }
