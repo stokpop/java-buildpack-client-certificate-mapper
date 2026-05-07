@@ -23,6 +23,7 @@ import javax.servlet.ServletException;
 import javax.servlet.ServletRequest;
 import javax.servlet.ServletResponse;
 import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpServletRequestWrapper;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -60,6 +61,8 @@ final class ClientCertificateMapper implements Filter {
 
     private static final String RAW_CACHE_KEY_PROPERTY = "org.cloudfoundry.router.certificate.cache.raw.key";
 
+    private static final String STRIP_HEADER_PROPERTY = "org.cloudfoundry.router.certificate.header.remove";
+
     private static final int MAX_CACHE_SIZE = 100;
 
     private final Logger logger = Logger.getLogger(this.getClass().getName());
@@ -72,11 +75,15 @@ final class ClientCertificateMapper implements Filter {
     /** When {@code true}, the full raw header value is used as the cache key for non-XFCC certs; otherwise SHA-256 is used. */
     private final boolean rawCacheKeyFull;
 
+    /** When {@code true}, the {@code X-Forwarded-Client-Cert} header is hidden from downstream filters after parsing. */
+    private final boolean stripXfccHeader;
+
     ClientCertificateMapper() throws CertificateException {
         this.certificateFactory = CertificateFactory.getInstance("X.509");
         boolean cacheEnabled = !"false".equalsIgnoreCase(System.getProperty(CACHE_ENABLED_PROPERTY, "true"));
         this.certificateCache = cacheEnabled ? new ConcurrentHashMap<>() : null;
         this.rawCacheKeyFull = "full".equalsIgnoreCase(System.getProperty(RAW_CACHE_KEY_PROPERTY, "sha256"));
+        this.stripXfccHeader = "true".equalsIgnoreCase(System.getProperty(STRIP_HEADER_PROPERTY, "false"));
     }
 
     @Override
@@ -95,6 +102,10 @@ final class ClientCertificateMapper implements Filter {
                 }
             } catch (CertificateException e) {
                 this.logger.warning("Unable to parse certificates in X-Forwarded-Client-Cert");
+            }
+            // Only wrap when the header is actually present — avoids allocation on requests without a cert.
+            if (this.stripXfccHeader && ((HttpServletRequest) request).getHeader(HEADER) != null) {
+                request = new XfccStrippingRequestWrapper((HttpServletRequest) request);
             }
         }
 
@@ -295,6 +306,32 @@ final class ClientCertificateMapper implements Filter {
 
     private boolean hasMultipleCertificates(String candidate) {
         return candidate.indexOf(',') != -1;
+    }
+
+    private static final class XfccStrippingRequestWrapper extends HttpServletRequestWrapper {
+
+        XfccStrippingRequestWrapper(HttpServletRequest request) {
+            super(request);
+        }
+
+        @Override
+        public String getHeader(String name) {
+            if (HEADER.equalsIgnoreCase(name)) return null;
+            return super.getHeader(name);
+        }
+
+        @Override
+        public Enumeration<String> getHeaders(String name) {
+            if (HEADER.equalsIgnoreCase(name)) return Collections.emptyEnumeration();
+            return super.getHeaders(name);
+        }
+
+        @Override
+        public Enumeration<String> getHeaderNames() {
+            List<String> names = Collections.list(super.getHeaderNames());
+            names.removeIf(name -> HEADER.equalsIgnoreCase(name));
+            return Collections.enumeration(names);
+        }
     }
 
 }
