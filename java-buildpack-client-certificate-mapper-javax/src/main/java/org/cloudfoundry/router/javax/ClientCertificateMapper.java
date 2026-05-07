@@ -28,6 +28,9 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.UnsupportedEncodingException;
 import java.net.URLDecoder;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.security.cert.CertificateException;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
@@ -55,19 +58,25 @@ final class ClientCertificateMapper implements Filter {
 
     private static final String CACHE_ENABLED_PROPERTY = "org.cloudfoundry.router.certificate.cache.enabled";
 
+    private static final String RAW_CACHE_KEY_PROPERTY = "org.cloudfoundry.router.certificate.cache.raw.key";
+
     private static final int MAX_CACHE_SIZE = 100;
 
     private final Logger logger = Logger.getLogger(this.getClass().getName());
 
     private final CertificateFactory certificateFactory;
 
-    /** Keyed by the XFCC {@code Hash=} fingerprint. {@code null} when caching is disabled. */
+    /** Keyed by the XFCC {@code Hash=} fingerprint or a derived raw-cert key. {@code null} when caching is disabled. */
     private final Map<String, X509Certificate> certificateCache;
+
+    /** When {@code true}, the full raw header value is used as the cache key for non-XFCC certs; otherwise SHA-256 is used. */
+    private final boolean rawCacheKeyFull;
 
     ClientCertificateMapper() throws CertificateException {
         this.certificateFactory = CertificateFactory.getInstance("X.509");
         boolean cacheEnabled = !"false".equalsIgnoreCase(System.getProperty(CACHE_ENABLED_PROPERTY, "true"));
         this.certificateCache = cacheEnabled ? new ConcurrentHashMap<>() : null;
+        this.rawCacheKeyFull = "full".equalsIgnoreCase(System.getProperty(RAW_CACHE_KEY_PROPERTY, "sha256"));
     }
 
     @Override
@@ -210,7 +219,36 @@ final class ClientCertificateMapper implements Filter {
             }
             return cert;
         }
+        // Computing the cache key (SHA-256 or identity) is cheaper than parsing the raw value into an X509Certificate each time.
+        if (this.certificateCache != null) {
+            String cacheKey = computeRawCacheKey(rawValue);
+            X509Certificate cached = this.certificateCache.get(cacheKey);
+            if (cached != null) {
+                return cached;
+            }
+            X509Certificate cert = generateCertificate(rawValue);
+            if (this.certificateCache.size() < MAX_CACHE_SIZE) {
+                this.certificateCache.put(cacheKey, cert);
+            }
+            return cert;
+        }
         return generateCertificate(rawValue);
+    }
+
+    private String computeRawCacheKey(String rawValue) {
+        if (this.rawCacheKeyFull) {
+            return rawValue;
+        }
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-256").digest(rawValue.getBytes(StandardCharsets.UTF_8));
+            StringBuilder sb = new StringBuilder(digest.length * 2);
+            for (byte b : digest) {
+                sb.append(String.format("%02x", b));
+            }
+            return sb.toString();
+        } catch (NoSuchAlgorithmException e) {
+            throw new RuntimeException("SHA-256 not available", e);
+        }
     }
 
     private List<X509Certificate> getCertificates(HttpServletRequest request) throws CertificateException, IOException {
