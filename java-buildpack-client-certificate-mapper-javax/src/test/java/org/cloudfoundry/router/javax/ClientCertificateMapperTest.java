@@ -22,9 +22,11 @@ import org.springframework.mock.web.MockHttpServletRequest;
 import org.springframework.mock.web.MockHttpServletResponse;
 
 import javax.servlet.ServletException;
+import javax.servlet.http.HttpServletRequest;
 import java.io.IOException;
 import java.security.cert.CertificateException;
 import java.security.cert.X509Certificate;
+import java.util.Collections;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -184,6 +186,168 @@ public final class ClientCertificateMapperTest {
 
         assertThat(this.filterChain.getRequest()).isNotNull();
         assertThat(this.request.getAttribute(ClientCertificateMapper.ATTRIBUTE)).isNull();
+    }
+
+    @Test
+    public void xfccHashOnly() throws IOException, ServletException {
+        this.request.addHeader(ClientCertificateMapper.HEADER, "Hash=078c0ea84e084ea1c8bf4719ede79c5b");
+
+        this.mapper.doFilter(this.request, this.response, this.filterChain);
+
+        assertThat(this.filterChain.getRequest()).isNotNull();
+        assertThat(this.request.getAttribute(ClientCertificateMapper.ATTRIBUTE)).isNull();
+    }
+
+    @Test
+    public void xfccWithCert() throws IOException, ServletException {
+        this.request.addHeader(ClientCertificateMapper.HEADER, "By=spiffe%3A%2F%2Fcluster.local;Hash=078c0ea84e084ea1c8bf4719ede79c5b;Cert=" + NGINX_ESCAPED_CERT);
+
+        this.mapper.doFilter(this.request, this.response, this.filterChain);
+
+        assertThat(this.filterChain.getRequest()).isNotNull();
+        assertThat((X509Certificate[]) this.request.getAttribute(ClientCertificateMapper.ATTRIBUTE)).hasSize(1);
+    }
+
+    @Test
+    public void xfccCaseInsensitiveKeys() throws IOException, ServletException {
+        this.request.addHeader(ClientCertificateMapper.HEADER, "hash=078c0ea84e084ea1c8bf4719ede79c5b");
+
+        this.mapper.doFilter(this.request, this.response, this.filterChain);
+
+        assertThat(this.filterChain.getRequest()).isNotNull();
+        assertThat(this.request.getAttribute(ClientCertificateMapper.ATTRIBUTE)).isNull();
+    }
+
+    @Test
+    public void xfccCaseInsensitiveCert() throws IOException, ServletException {
+        this.request.addHeader(ClientCertificateMapper.HEADER, "hash=078c0ea84e084ea1c8bf4719ede79c5b;cert=" + NGINX_ESCAPED_CERT);
+
+        this.mapper.doFilter(this.request, this.response, this.filterChain);
+
+        assertThat(this.filterChain.getRequest()).isNotNull();
+        assertThat((X509Certificate[]) this.request.getAttribute(ClientCertificateMapper.ATTRIBUTE)).hasSize(1);
+    }
+
+    @Test
+    public void xfccChainFallback() throws IOException, ServletException {
+        this.request.addHeader(ClientCertificateMapper.HEADER, "Hash=078c0ea84e084ea1c8bf4719ede79c5b;Chain=" + NGINX_ESCAPED_CERT);
+
+        this.mapper.doFilter(this.request, this.response, this.filterChain);
+
+        assertThat(this.filterChain.getRequest()).isNotNull();
+        assertThat((X509Certificate[]) this.request.getAttribute(ClientCertificateMapper.ATTRIBUTE)).hasSize(1);
+    }
+
+    @Test
+    public void xfccSubjectWithSemicolonDoesNotBreakCert() throws IOException, ServletException {
+        this.request.addHeader(ClientCertificateMapper.HEADER,
+            "Subject=\"/C=US/ST=CA;L=SF\";Cert=" + NGINX_ESCAPED_CERT);
+
+        this.mapper.doFilter(this.request, this.response, this.filterChain);
+
+        assertThat(this.filterChain.getRequest()).isNotNull();
+        assertThat((X509Certificate[]) this.request.getAttribute(ClientCertificateMapper.ATTRIBUTE)).hasSize(1);
+    }
+
+    @Test
+    public void xfccCacheHit() throws IOException, ServletException {
+        String header = "Hash=078c0ea84e084ea1c8bf4719ede79c5b;Cert=" + NGINX_ESCAPED_CERT;
+
+        this.request.addHeader(ClientCertificateMapper.HEADER, header);
+        this.mapper.doFilter(this.request, this.response, this.filterChain);
+        X509Certificate first = ((X509Certificate[]) this.request.getAttribute(ClientCertificateMapper.ATTRIBUTE))[0];
+
+        MockHttpServletRequest request2 = new MockHttpServletRequest();
+        request2.addHeader(ClientCertificateMapper.HEADER, header);
+        this.mapper.doFilter(request2, this.response, new MockFilterChain());
+        X509Certificate second = ((X509Certificate[]) request2.getAttribute(ClientCertificateMapper.ATTRIBUTE))[0];
+
+        assertThat(second).isSameAs(first);
+    }
+
+    @Test
+    public void rawCacheHitSha256() throws IOException, ServletException, CertificateException {
+        // SHA-256 key (default): second request with same raw cert returns the same X509Certificate instance
+        this.request.addHeader(ClientCertificateMapper.HEADER, CERTIFICATE_1);
+        this.mapper.doFilter(this.request, this.response, this.filterChain);
+        X509Certificate first = ((X509Certificate[]) this.request.getAttribute(ClientCertificateMapper.ATTRIBUTE))[0];
+
+        MockHttpServletRequest request2 = new MockHttpServletRequest();
+        request2.addHeader(ClientCertificateMapper.HEADER, CERTIFICATE_1);
+        this.mapper.doFilter(request2, this.response, new MockFilterChain());
+        X509Certificate second = ((X509Certificate[]) request2.getAttribute(ClientCertificateMapper.ATTRIBUTE))[0];
+
+        assertThat(second).isSameAs(first);
+    }
+
+    @Test
+    public void rawCacheHitFullKey() throws IOException, ServletException, CertificateException {
+        // full key strategy: second request with same raw cert returns the same X509Certificate instance
+        System.setProperty("org.cloudfoundry.router.certificate.cache.raw.key", "full");
+        try {
+            ClientCertificateMapper mapper = new ClientCertificateMapper();
+
+            MockHttpServletRequest req1 = new MockHttpServletRequest();
+            req1.addHeader(ClientCertificateMapper.HEADER, CERTIFICATE_1);
+            mapper.doFilter(req1, this.response, new MockFilterChain());
+            X509Certificate first = ((X509Certificate[]) req1.getAttribute(ClientCertificateMapper.ATTRIBUTE))[0];
+
+            MockHttpServletRequest req2 = new MockHttpServletRequest();
+            req2.addHeader(ClientCertificateMapper.HEADER, CERTIFICATE_1);
+            mapper.doFilter(req2, this.response, new MockFilterChain());
+            X509Certificate second = ((X509Certificate[]) req2.getAttribute(ClientCertificateMapper.ATTRIBUTE))[0];
+
+            assertThat(second).isSameAs(first);
+        } finally {
+            System.clearProperty("org.cloudfoundry.router.certificate.cache.raw.key");
+        }
+    }
+
+    @Test
+    public void stripXfccHeaderEnabled() throws IOException, ServletException, CertificateException {
+        System.setProperty("org.cloudfoundry.router.certificate.header.remove", "true");
+        try {
+            ClientCertificateMapper mapper = new ClientCertificateMapper();
+            this.request.addHeader(ClientCertificateMapper.HEADER, CERTIFICATE_1);
+
+            MockFilterChain chain = new MockFilterChain();
+            mapper.doFilter(this.request, this.response, chain);
+
+            HttpServletRequest downstream = (HttpServletRequest) chain.getRequest();
+            assertThat(downstream.getHeader(ClientCertificateMapper.HEADER)).isNull();
+            assertThat(Collections.list(downstream.getHeaders(ClientCertificateMapper.HEADER))).isEmpty();
+            assertThat(Collections.list(downstream.getHeaderNames())).doesNotContain(ClientCertificateMapper.HEADER);
+            // cert attribute still set
+            assertThat((X509Certificate[]) downstream.getAttribute(ClientCertificateMapper.ATTRIBUTE)).hasSize(1);
+        } finally {
+            System.clearProperty("org.cloudfoundry.router.certificate.header.remove");
+        }
+    }
+
+    @Test
+    public void stripXfccHeaderDisabledByDefault() throws IOException, ServletException {
+        this.request.addHeader(ClientCertificateMapper.HEADER, CERTIFICATE_1);
+
+        MockFilterChain chain = new MockFilterChain();
+        this.mapper.doFilter(this.request, this.response, chain);
+
+        HttpServletRequest downstream = (HttpServletRequest) chain.getRequest();
+        assertThat(downstream.getHeader(ClientCertificateMapper.HEADER)).isNotNull();
+    }
+
+    @Test
+    public void stripXfccHeaderNoWrapWhenHeaderAbsent() throws IOException, ServletException, CertificateException {
+        // When strip is enabled but no XFCC header is present, no wrapper is created
+        System.setProperty("org.cloudfoundry.router.certificate.header.remove", "true");
+        try {
+            ClientCertificateMapper mapper = new ClientCertificateMapper();
+            MockFilterChain chain = new MockFilterChain();
+            mapper.doFilter(this.request, this.response, chain);
+
+            assertThat(chain.getRequest()).isSameAs(this.request);
+        } finally {
+            System.clearProperty("org.cloudfoundry.router.certificate.header.remove");
+        }
     }
 
 }
