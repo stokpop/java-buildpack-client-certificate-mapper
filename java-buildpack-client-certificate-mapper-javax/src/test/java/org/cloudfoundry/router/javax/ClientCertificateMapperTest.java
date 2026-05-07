@@ -247,4 +247,20 @@ public final class ClientCertificateMapperTest {
         assertThat((X509Certificate[]) this.request.getAttribute(ClientCertificateMapper.ATTRIBUTE)).hasSize(1);
     }
 
+    @Test
+    public void xfccCacheHit() throws IOException, ServletException {
+        String header = "Hash=078c0ea84e084ea1c8bf4719ede79c5b;Cert=" + NGINX_ESCAPED_CERT;
+
+        this.request.addHeader(ClientCertificateMapper.HEADER, header);
+        this.mapper.doFilter(this.request, this.response, this.filterChain);
+        X509Certificate first = ((X509Certificate[]) this.request.getAttribute(ClientCertificateMapper.ATTRIBUTE))[0];
+
+        MockHttpServletRequest request2 = new MockHttpServletRequest();
+        request2.addHeader(ClientCertificateMapper.HEADER, header);
+        this.mapper.doFilter(request2, this.response, new MockFilterChain());
+        X509Certificate second = ((X509Certificate[]) request2.getAttribute(ClientCertificateMapper.ATTRIBUTE))[0];
+
+        assertThat(second).isSameAs(first);
+    }
+
 }
