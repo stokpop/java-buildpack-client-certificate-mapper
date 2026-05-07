@@ -37,6 +37,8 @@ import java.util.Base64;
 import java.util.Collections;
 import java.util.Enumeration;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.logging.Logger;
 
 /**
@@ -49,12 +51,23 @@ final class ClientCertificateMapper implements Filter {
 
     static final String HEADER = "X-Forwarded-Client-Cert";
 
+    private static final List<String> XFCC_KEYS = Arrays.asList("By=", "Hash=", "Cert=", "Chain=", "Subject=", "URI=", "DNS=");
+
+    private static final String CACHE_ENABLED_PROPERTY = "org.cloudfoundry.router.certificate.cache.enabled";
+
+    private static final int MAX_CACHE_SIZE = 100;
+
     private final Logger logger = Logger.getLogger(this.getClass().getName());
 
     private final CertificateFactory certificateFactory;
 
+    /** Keyed by the XFCC {@code Hash=} fingerprint. {@code null} when caching is disabled. */
+    private final Map<String, X509Certificate> certificateCache;
+
     ClientCertificateMapper() throws CertificateException {
         this.certificateFactory = CertificateFactory.getInstance("X.509");
+        boolean cacheEnabled = !"false".equalsIgnoreCase(System.getProperty(CACHE_ENABLED_PROPERTY, "true"));
+        this.certificateCache = cacheEnabled ? new ConcurrentHashMap<>() : null;
     }
 
     @Override
@@ -94,6 +107,49 @@ final class ClientCertificateMapper implements Filter {
                 throw new IllegalArgumentException("Header contains value that is neither base64 nor url encoded");
             }
         }
+    }
+
+    private X509Certificate generateCertificate(String certData) throws CertificateException, IOException {
+        try (InputStream in = new ByteArrayInputStream(decodeHeader(certData))) {
+            return (X509Certificate) this.certificateFactory.generateCertificate(in);
+        }
+    }
+
+    private String xfccFieldNames(String xfccEntry) {
+        StringBuilder names = new StringBuilder();
+        for (String key : XFCC_KEYS) {
+            if (extractFieldFromXfcc(xfccEntry, key) != null) {
+                if (names.length() > 0) names.append(", ");
+                names.append(key, 0, key.length() - 1); // strip trailing '='
+            }
+        }
+        return names.toString();
+    }
+
+    private X509Certificate parseCertificate(String rawValue) throws CertificateException, IOException {
+        if (isXfccFormat(rawValue)) {
+            this.logger.fine("XFCC entry received with fields: " + xfccFieldNames(rawValue));
+            String hash = extractFieldFromXfcc(rawValue, "Hash=");
+            if (hash != null && this.certificateCache != null) {
+                X509Certificate cached = this.certificateCache.get(hash);
+                if (cached != null) {
+                    return cached;
+                }
+            }
+            String certData = extractFieldFromXfcc(rawValue, "Cert=");
+            if (certData == null) {
+                certData = extractFieldFromXfcc(rawValue, "Chain=");
+            }
+            if (certData == null) {
+                return null;
+            }
+            X509Certificate cert = generateCertificate(certData);
+            if (hash != null && this.certificateCache != null && this.certificateCache.size() < MAX_CACHE_SIZE) {
+                this.certificateCache.put(hash, cert);
+            }
+            return cert;
+        }
+        return generateCertificate(rawValue);
     }
 
     private List<X509Certificate> getCertificates(HttpServletRequest request) throws CertificateException, IOException {

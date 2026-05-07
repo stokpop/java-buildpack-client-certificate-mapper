@@ -186,4 +186,86 @@ public final class ClientCertificateMapperTest {
         assertThat(this.request.getAttribute(ClientCertificateMapper.ATTRIBUTE)).isNull();
     }
 
+    @Test
+    public void xfccHashOnly() throws IOException, ServletException {
+        this.request.addHeader(ClientCertificateMapper.HEADER, "Hash=078c0ea84e084ea1c8bf4719ede79c5b");
+
+        this.mapper.doFilter(this.request, this.response, this.filterChain);
+
+        assertThat(this.filterChain.getRequest()).isNotNull();
+        assertThat(this.request.getAttribute(ClientCertificateMapper.ATTRIBUTE)).isNull();
+    }
+
+    @Test
+    public void xfccWithCert() throws IOException, ServletException {
+        this.request.addHeader(ClientCertificateMapper.HEADER, "By=spiffe%3A%2F%2Fcluster.local;Hash=078c0ea84e084ea1c8bf4719ede79c5b;Cert=" + NGINX_ESCAPED_CERT);
+
+        this.mapper.doFilter(this.request, this.response, this.filterChain);
+
+        assertThat(this.filterChain.getRequest()).isNotNull();
+        assertThat((X509Certificate[]) this.request.getAttribute(ClientCertificateMapper.ATTRIBUTE)).hasSize(1);
+    }
+
+    @Test
+    public void xfccCaseInsensitiveKeys() throws IOException, ServletException {
+        // Keys are case-insensitive per the Envoy XFCC spec
+        this.request.addHeader(ClientCertificateMapper.HEADER, "hash=078c0ea84e084ea1c8bf4719ede79c5b");
+
+        this.mapper.doFilter(this.request, this.response, this.filterChain);
+
+        assertThat(this.filterChain.getRequest()).isNotNull();
+        assertThat(this.request.getAttribute(ClientCertificateMapper.ATTRIBUTE)).isNull();
+    }
+
+    @Test
+    public void xfccCaseInsensitiveCert() throws IOException, ServletException {
+        // Keys are case-insensitive per the Envoy XFCC spec
+        this.request.addHeader(ClientCertificateMapper.HEADER, "hash=078c0ea84e084ea1c8bf4719ede79c5b;cert=" + NGINX_ESCAPED_CERT);
+
+        this.mapper.doFilter(this.request, this.response, this.filterChain);
+
+        assertThat(this.filterChain.getRequest()).isNotNull();
+        assertThat((X509Certificate[]) this.request.getAttribute(ClientCertificateMapper.ATTRIBUTE)).hasSize(1);
+    }
+
+    @Test
+    public void xfccChainFallback() throws IOException, ServletException {
+        // Chain= should be used when Cert= is absent
+        this.request.addHeader(ClientCertificateMapper.HEADER, "Hash=078c0ea84e084ea1c8bf4719ede79c5b;Chain=" + NGINX_ESCAPED_CERT);
+
+        this.mapper.doFilter(this.request, this.response, this.filterChain);
+
+        assertThat(this.filterChain.getRequest()).isNotNull();
+        assertThat((X509Certificate[]) this.request.getAttribute(ClientCertificateMapper.ATTRIBUTE)).hasSize(1);
+    }
+
+    @Test
+    public void xfccSubjectWithSemicolonDoesNotBreakCert() throws IOException, ServletException {
+        // Subject values are always double-quoted; semicolons inside quotes must not split the field
+        this.request.addHeader(ClientCertificateMapper.HEADER,
+            "Subject=\"/C=US/ST=CA;L=SF\";Cert=" + NGINX_ESCAPED_CERT);
+
+        this.mapper.doFilter(this.request, this.response, this.filterChain);
+
+        assertThat(this.filterChain.getRequest()).isNotNull();
+        assertThat((X509Certificate[]) this.request.getAttribute(ClientCertificateMapper.ATTRIBUTE)).hasSize(1);
+    }
+
+    @Test
+    public void xfccCacheHit() throws IOException, ServletException {
+        // Second request with the same Hash= returns the same X509Certificate instance from cache
+        String header = "Hash=078c0ea84e084ea1c8bf4719ede79c5b;Cert=" + NGINX_ESCAPED_CERT;
+
+        this.request.addHeader(ClientCertificateMapper.HEADER, header);
+        this.mapper.doFilter(this.request, this.response, this.filterChain);
+        X509Certificate first = ((X509Certificate[]) this.request.getAttribute(ClientCertificateMapper.ATTRIBUTE))[0];
+
+        MockHttpServletRequest request2 = new MockHttpServletRequest();
+        request2.addHeader(ClientCertificateMapper.HEADER, header);
+        this.mapper.doFilter(request2, this.response, new MockFilterChain());
+        X509Certificate second = ((X509Certificate[]) request2.getAttribute(ClientCertificateMapper.ATTRIBUTE))[0];
+
+        assertThat(second).isSameAs(first);
+    }
+
 }
