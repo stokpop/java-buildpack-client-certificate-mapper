@@ -320,6 +320,31 @@ public final class ClientCertificateMapperTest {
     }
 
     @Test
+    public void malformedUrlEncodedCertDoesNotThrow() throws IOException, ServletException {
+        // %GG is invalid URL encoding; URLDecoder throws IllegalArgumentException
+        // doFilter() must catch it, log, and let the request proceed
+        this.request.addHeader(ClientCertificateMapper.HEADER, "%GGinvalidcert");
+
+        this.mapper.doFilter(this.request, this.response, this.filterChain);
+
+        assertThat(this.filterChain.getRequest()).isNotNull();
+        assertThat(this.request.getAttribute(ClientCertificateMapper.ATTRIBUTE)).isNull();
+    }
+
+    @Test
+    public void xfccWithMalformedCertDoesNotThrow() throws IOException, ServletException {
+        // XFCC Cert= field with invalid URL encoding; URLDecoder throws IllegalArgumentException
+        // doFilter() must catch it, log, and let the request proceed
+        this.request.addHeader(ClientCertificateMapper.HEADER,
+            "Hash=078c0ea84e084ea1c8bf4719ede79c5b078c0ea84e084ea1c8bf4719ede79c5b;Cert=%GGinvalid");
+
+        this.mapper.doFilter(this.request, this.response, this.filterChain);
+
+        assertThat(this.filterChain.getRequest()).isNotNull();
+        assertThat(this.request.getAttribute(ClientCertificateMapper.ATTRIBUTE)).isNull();
+    }
+
+    @Test
     public void xfccMultipleEntriesFirstHashWins() throws IOException, ServletException {
         this.request.addHeader(ClientCertificateMapper.HEADER,
             "Hash=aaaa000000000000000000000000000000000000000000000000000000000000;Subject=\"/CN=first\"," +

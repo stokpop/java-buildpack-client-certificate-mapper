@@ -28,6 +28,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.UnsupportedEncodingException;
 import java.net.URLDecoder;
+import static java.nio.charset.StandardCharsets.UTF_8;
 import java.security.cert.CertificateException;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
@@ -74,7 +75,8 @@ final class ClientCertificateMapper implements Filter {
                 if (!certificates.isEmpty()) {
                     request.setAttribute(ATTRIBUTE, certificates.toArray(new X509Certificate[0]));
                 }
-            } catch (CertificateException e) {
+            // IllegalArgumentException: malformed %xx in URL-encoded cert value; treat same as parse failure
+            } catch (CertificateException | IllegalArgumentException e) {
                 this.logger.warning("Unable to parse certificates in X-Forwarded-Client-Cert");
             }
         }
@@ -87,15 +89,31 @@ final class ClientCertificateMapper implements Filter {
 
     }
 
-    private byte[] decodeHeader(String rawCertificate) {
+    /**
+     * Decodes a raw header value to bytes. Tries standard Base64 first; on failure falls back to
+     * URL-encoding (as emitted by nginx's {@code $ssl_client_escaped_cert} variable).
+     * Throws {@link IllegalArgumentException} when neither encoding matches or the URL-encoded
+     * value contains malformed {@code %xx} sequences.
+     */
+    private static byte[] decodeHeader(String rawCertificate) {
         try {
             return Base64.getDecoder().decode(rawCertificate);
-        } catch (IllegalArgumentException e1) {
-            try {
-                return URLDecoder.decode(rawCertificate, "utf-8").getBytes();
-            } catch (UnsupportedEncodingException e2) {
-                throw new IllegalArgumentException("Header contains value that is neither base64 nor url encoded");
-            }
+        } catch (IllegalArgumentException e) {
+            return urlDecodeCert(rawCertificate);
+        }
+    }
+
+    /**
+     * URL-decodes a certificate value and returns the UTF-8 bytes of the decoded string.
+     * {@link UnsupportedEncodingException} cannot occur for UTF-8 but is declared by the
+     * Java 8 {@link java.net.URLDecoder} API; it is chained as cause if somehow thrown.
+     * Malformed {@code %xx} sequences cause {@link IllegalArgumentException} to propagate.
+     */
+    private static byte[] urlDecodeCert(String rawCertificate) {
+        try {
+            return URLDecoder.decode(rawCertificate, UTF_8.name()).getBytes(UTF_8);
+        } catch (UnsupportedEncodingException e) {
+            throw new IllegalArgumentException("Header contains value that is neither base64 nor url encoded", e);
         }
     }
 

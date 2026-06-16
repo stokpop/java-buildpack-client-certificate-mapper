@@ -5,7 +5,7 @@
 | CI | [![CI](https://github.com/cloudfoundry/java-buildpack-client-certificate-mapper/actions/workflows/ci.yml/badge.svg)](https://github.com/cloudfoundry/java-buildpack-client-certificate-mapper/actions/workflows/ci.yml) |
 | Release | [![Release](https://github.com/cloudfoundry/java-buildpack-client-certificate-mapper/actions/workflows/release.yml/badge.svg)](https://github.com/cloudfoundry/java-buildpack-client-certificate-mapper/actions/workflows/release.yml) |
 
-The `java-buildpack-client-certificate-mapper` is a Servlet filter that maps the [`X-Forwarded-Client-Cert`][xfcc] header to the `javax.servlet.request.X509Certificate` (javax) or `jakarta.servlet.request.X509Certificate` (jakarta) Servlet attribute. Both raw PEM and [Envoy XFCC format][xfcc] are supported.
+The `java-buildpack-client-certificate-mapper` is a Servlet filter that maps the [`X-Forwarded-Client-Cert`][xfcc] header to the `javax.servlet.request.X509Certificate` (javax) or `jakarta.servlet.request.X509Certificate` (jakarta) Servlet attribute. Both base64-encoded DER and URL-encoded PEM certificates, as well as [Envoy XFCC format][xfcc], are supported.
 
 ## Download
 
@@ -24,7 +24,7 @@ $ ./mvnw clean package
 
 ## XFCC Header Format
 
-The filter supports both the raw PEM certificate format and the [Envoy XFCC format][xfcc]. In XFCC format, the header contains key-value fields such as `Hash=`, `Cert=`, and `Subject=`. Field names are matched case-insensitively. Multiple header values and the [RFC 9110][rfc9110] comma-delimited equivalent are both supported.
+The filter supports base64-encoded DER certificates, URL-encoded PEM certificates, and the [Envoy XFCC format][xfcc]. In XFCC format, the header contains key-value fields such as `Hash=`, `Cert=`, and `Subject=`. Field names are matched case-insensitively. Multiple header values and the [RFC 9110][rfc9110] comma-delimited equivalent are both supported.
 
 The `Hash=` field (a SHA-256 fingerprint of the leaf certificate, set by the router) is recognised for format detection and optionally sanity-checked, but it cannot be mapped to an `X509Certificate` without a `Cert=` field.
 
@@ -61,6 +61,12 @@ Unknown fields are silently skipped and logged at `FINE` level.
 - [Envoy `x-forwarded-client-cert` header][xfcc] — XFCC field definitions (`Hash=`, `Cert=`, `Chain=`, `Subject=`)
 - [RFC 9110 §5.3][rfc9110] — HTTP header comma-delimited field values
 - [Jakarta Servlet 6.0 specification][servlet-spec] — `jakarta.servlet.request.X509Certificate` attribute
+
+## Error Handling
+
+Certificate parse failures (invalid Base64, invalid `CertificateFactory` input) are caught inside `doFilter()`, logged as a `WARNING`, and the request is passed to the next filter without setting the certificate attribute. This behaviour is unchanged from earlier versions.
+
+**Behaviour change (this version):** previously, a malformed URL-encoded value in the header (e.g. a `%GG` sequence that `URLDecoder` cannot decode) caused an `IllegalArgumentException` to propagate uncaught out of `doFilter()`, typically resulting in a 500 response. From this version that exception is caught alongside `CertificateException` and the same log-and-continue behaviour applies.
 
 ## Debug Logging
 
