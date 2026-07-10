@@ -28,20 +28,24 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.UnsupportedEncodingException;
 import java.net.URLDecoder;
+import static java.nio.charset.StandardCharsets.UTF_8;
 import java.security.cert.CertificateException;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Base64;
 import java.util.Collections;
-import java.util.Enumeration;
 import java.util.List;
 import java.util.logging.Logger;
+import org.cloudfoundry.router.CfSubjectDn;
+import org.cloudfoundry.router.XfccAttributes;
+import org.cloudfoundry.router.XfccEntry;
+import org.cloudfoundry.router.XfccField;
+import org.cloudfoundry.router.XfccHeaderParser;
 
 /**
  * A Servlet {@link Filter} that translates the {@code X-Forwarded-Client} HTTP header to the {@code jakarta.servlet.request.X509Certificate} Servlet attribute.  This implementation handles both
- * multiple headers as well as the <a href=https://tools.ietf.org/html/rfc7230#section-3.2.2>RFC 7230</a> comma delimited equivalent.
+ * multiple headers as well as the <a href=https://www.rfc-editor.org/rfc/rfc9110#section-5.3>RFC 9110</a> comma delimited equivalent.
  */
 final class ClientCertificateMapper implements Filter {
 
@@ -71,7 +75,8 @@ final class ClientCertificateMapper implements Filter {
                 if (!certificates.isEmpty()) {
                     request.setAttribute(ATTRIBUTE, certificates.toArray(new X509Certificate[0]));
                 }
-            } catch (CertificateException e) {
+            // IllegalArgumentException: malformed %xx in URL-encoded cert value; treat same as parse failure
+            } catch (CertificateException | IllegalArgumentException e) {
                 this.logger.warning("Unable to parse certificates in X-Forwarded-Client-Cert");
             }
         }
@@ -84,53 +89,110 @@ final class ClientCertificateMapper implements Filter {
 
     }
 
-    private byte[] decodeHeader(String rawCertificate) {
+    /**
+     * Decodes a raw header value to bytes. Tries standard Base64 first; on failure falls back to
+     * URL-encoding (as emitted by nginx's {@code $ssl_client_escaped_cert} variable).
+     * Throws {@link IllegalArgumentException} when neither encoding matches or the URL-encoded
+     * value contains malformed {@code %xx} sequences.
+     */
+    private static byte[] decodeHeader(String rawCertificate) {
         try {
             return Base64.getDecoder().decode(rawCertificate);
-        } catch (IllegalArgumentException e1) {
-            try {
-                return URLDecoder.decode(rawCertificate, "utf-8").getBytes();
-            } catch (UnsupportedEncodingException e2) {
-                throw new IllegalArgumentException("Header contains value that is neither base64 nor url encoded");
-            }
+        } catch (IllegalArgumentException e) {
+            return urlDecodeCert(rawCertificate);
         }
+    }
+
+    /**
+     * URL-decodes a certificate value and returns the UTF-8 bytes of the decoded string.
+     * {@link UnsupportedEncodingException} cannot occur for UTF-8 but is declared by the
+     * Java 8 {@link java.net.URLDecoder} API; it is chained as cause if somehow thrown.
+     * Malformed {@code %xx} sequences cause {@link IllegalArgumentException} to propagate.
+     */
+    private static byte[] urlDecodeCert(String rawCertificate) {
+        try {
+            return URLDecoder.decode(rawCertificate, UTF_8.name()).getBytes(UTF_8);
+        } catch (UnsupportedEncodingException e) {
+            throw new IllegalArgumentException("Header contains value that is neither base64 nor url encoded", e);
+        }
+    }
+
+    private X509Certificate generateCertificate(String certData) throws CertificateException, IOException {
+        try (InputStream in = new ByteArrayInputStream(decodeHeader(certData))) {
+            return (X509Certificate) this.certificateFactory.generateCertificate(in);
+        }
+    }
+
+    private X509Certificate parseCertificate(String rawValue, XfccEntry xfcc) throws CertificateException, IOException {
+        if (xfcc.resemblesXfcc()) {
+            if (this.logger.isLoggable(java.util.logging.Level.FINE)) {
+                this.logger.fine("XFCC entry received with fields: " + xfcc.fieldNames());
+            }
+            String hash = xfcc.get(XfccField.HASH);
+            if (xfcc.hasField(XfccField.HASH) && !XfccHeaderParser.isValidSha256Hex(hash)) {
+                this.logger.warning("X-Forwarded-Client-Cert Hash= value does not look like a SHA-256 hex digest");
+            }
+            if (!xfcc.hasField(XfccField.CERT)) {
+                if (xfcc.hasField(XfccField.CHAIN)) {
+                    this.logger.warning("X-Forwarded-Client-Cert contains Chain= but no Cert= field; Chain= is not supported and the certificate will not be mapped.");
+                }
+                return null;
+            }
+            return generateCertificate(xfcc.get(XfccField.CERT));
+        }
+        return generateCertificate(rawValue);
     }
 
     private List<X509Certificate> getCertificates(HttpServletRequest request) throws CertificateException, IOException {
         List<X509Certificate> certificates = new ArrayList<>();
 
-        for (String rawCertificate : getRawCertificates(request)) {
-            try (InputStream in = new ByteArrayInputStream(decodeHeader(rawCertificate))) {
-                certificates.add((X509Certificate) this.certificateFactory.generateCertificate(in));
+        for (String rawValue : getRawCertificates(request)) {
+            XfccEntry xfcc = new XfccEntry(rawValue);
+            setXfccAttributes(request, xfcc);
+            X509Certificate cert = parseCertificate(rawValue, xfcc);
+            if (cert != null) {
+                certificates.add(cert);
             }
         }
 
         return certificates;
     }
 
-    private List<String> getRawCertificates(HttpServletRequest request) {
-        Enumeration<String> candidates = request.getHeaders(HEADER);
-
-        if (candidates == null) {
-            return Collections.emptyList();
+    private void setXfccAttributes(HttpServletRequest request, XfccEntry xfcc) {
+        if (!xfcc.resemblesXfcc()) {
+            return;
         }
-
-        List<String> rawCertificates = new ArrayList<>();
-        while (candidates.hasMoreElements()) {
-            String candidate = candidates.nextElement();
-
-            if (hasMultipleCertificates(candidate)) {
-                rawCertificates.addAll(Arrays.asList(candidate.split(",")));
-            } else {
-                rawCertificates.add(candidate);
-            }
+        if (request.getAttribute(XfccAttributes.HASH) == null && xfcc.hasField(XfccField.HASH)) {
+            request.setAttribute(XfccAttributes.HASH, xfcc.get(XfccField.HASH));
         }
-
-        return rawCertificates;
+        if (request.getAttribute(XfccAttributes.SUBJECT) == null && xfcc.hasField(XfccField.SUBJECT)) {
+            String subject = xfcc.get(XfccField.SUBJECT);
+            request.setAttribute(XfccAttributes.SUBJECT, subject);
+            setCfSubjectAttributes(request, subject);
+        }
     }
 
-    private boolean hasMultipleCertificates(String candidate) {
-        return candidate.indexOf(',') != -1;
+    private void setCfSubjectAttributes(HttpServletRequest request, String subject) {
+        CfSubjectDn dn = XfccHeaderParser.parseCfSubjectDn(subject);
+        if (dn == null) {
+            return;
+        }
+        if (request.getAttribute(XfccAttributes.APP_GUID) == null && dn.appGuid != null) {
+            request.setAttribute(XfccAttributes.APP_GUID, dn.appGuid);
+        }
+        if (request.getAttribute(XfccAttributes.SPACE_GUID) == null && dn.spaceGuid != null) {
+            request.setAttribute(XfccAttributes.SPACE_GUID, dn.spaceGuid);
+        }
+        if (request.getAttribute(XfccAttributes.ORG_GUID) == null && dn.orgGuid != null) {
+            request.setAttribute(XfccAttributes.ORG_GUID, dn.orgGuid);
+        }
+        if (request.getAttribute(XfccAttributes.INSTANCE_GUID) == null && dn.instanceGuid != null) {
+            request.setAttribute(XfccAttributes.INSTANCE_GUID, dn.instanceGuid);
+        }
+    }
+
+    private List<String> getRawCertificates(HttpServletRequest request) {
+        return XfccHeaderParser.splitHeaderValues(Collections.list(request.getHeaders(HEADER)));
     }
 
 }
