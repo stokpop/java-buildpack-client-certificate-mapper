@@ -40,8 +40,7 @@ import java.util.Base64;
 import java.util.Collections;
 import java.util.Enumeration;
 import java.util.List;
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
+import org.cloudfoundry.router.CertificateCache;
 import java.util.logging.Logger;
 import org.cloudfoundry.router.CfSubjectDn;
 import org.cloudfoundry.router.XfccAttributes;
@@ -65,14 +64,14 @@ final class ClientCertificateMapper implements Filter {
 
     private static final String STRIP_HEADER_PROPERTY = "org.cloudfoundry.router.certificate.header.remove";
 
-    private static final int MAX_CACHE_SIZE = 100;
+    private static final int MAX_CACHE_SIZE = 1000;
 
     private final Logger logger = Logger.getLogger(this.getClass().getName());
 
     private final CertificateFactory certificateFactory;
 
-    /** Keyed by the XFCC {@code Hash=} fingerprint or a derived raw-cert key. {@code null} when caching is disabled. */
-    private final Map<String, X509Certificate> certificateCache;
+    /** Cache keyed by XFCC {@code Hash=} fingerprint or derived raw-cert key. {@code null} when caching is disabled. */
+    private final CertificateCache certificateCache;
 
     /** When {@code true}, the full raw header value is used as the cache key for non-XFCC certs; otherwise SHA-256 is used. */
     private final boolean rawCacheKeyFull;
@@ -83,7 +82,7 @@ final class ClientCertificateMapper implements Filter {
     ClientCertificateMapper() throws CertificateException {
         this.certificateFactory = CertificateFactory.getInstance("X.509");
         boolean cacheEnabled = !"false".equalsIgnoreCase(System.getProperty(CACHE_ENABLED_PROPERTY, "true"));
-        this.certificateCache = cacheEnabled ? new ConcurrentHashMap<>() : null;
+        this.certificateCache = cacheEnabled ? new CertificateCache(MAX_CACHE_SIZE) : null;
         this.rawCacheKeyFull = "full".equalsIgnoreCase(System.getProperty(RAW_CACHE_KEY_PROPERTY, "sha256"));
         this.stripXfccHeader = "true".equalsIgnoreCase(System.getProperty(STRIP_HEADER_PROPERTY, "false"));
     }
@@ -160,7 +159,7 @@ final class ClientCertificateMapper implements Filter {
                 return null;
             }
             X509Certificate cert = generateCertificate(xfcc.get(XfccField.CERT));
-            if (hash != null && this.certificateCache != null && this.certificateCache.size() < MAX_CACHE_SIZE) {
+            if (hash != null && this.certificateCache != null) {
                 this.certificateCache.put(hash, cert);
             }
             return cert;
@@ -173,9 +172,7 @@ final class ClientCertificateMapper implements Filter {
                 return cached;
             }
             X509Certificate cert = generateCertificate(rawValue);
-            if (this.certificateCache.size() < MAX_CACHE_SIZE) {
-                this.certificateCache.put(cacheKey, cert);
-            }
+            this.certificateCache.put(cacheKey, cert);
             return cert;
         }
         return generateCertificate(rawValue);
