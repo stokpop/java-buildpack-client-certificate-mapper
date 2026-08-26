@@ -28,8 +28,10 @@ import java.util.concurrent.ConcurrentHashMap;
  * a fresh current generation starts. This keeps memory bounded at approximately
  * {@code 2 * maxGenSize} entries while avoiding any locking on the read path.
  *
- * <p><b>Memory budget.</b> Keys for XFCC entries are 64-byte SHA-256 hex strings (from the
- * router-supplied {@code Hash=} field). Keys for raw (non-XFCC) entries are the full header
+ * <p><b>Memory budget.</b> Keys for XFCC entries are the {@code Cert=} field value (~2–4 KB of
+ * URL-encoded PEM). Using the full {@code Cert=} value as the key is required for security: the
+ * {@code Hash=} field can be injected by external clients when header stripping is disabled.
+ * Keys for raw (non-XFCC) entries are the full header
  * value — typically 2–4 KB of base64/URL-encoded DER. With the default generation size of 128,
  * the cache holds at most ~256 {@code X509Certificate} objects plus ~1 MB of raw-cert key
  * strings, for a worst-case total of roughly 1.5 MB. If this is a concern, disable caching
