@@ -29,14 +29,13 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.UnsupportedEncodingException;
 import java.net.URLDecoder;
-import java.nio.charset.StandardCharsets;
+import static java.nio.charset.StandardCharsets.UTF_8;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.security.cert.CertificateException;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Base64;
 import java.util.Collections;
 import java.util.Enumeration;
@@ -44,6 +43,11 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.logging.Logger;
+import org.cloudfoundry.router.CfSubjectDn;
+import org.cloudfoundry.router.XfccAttributes;
+import org.cloudfoundry.router.XfccEntry;
+import org.cloudfoundry.router.XfccField;
+import org.cloudfoundry.router.XfccHeaderParser;
 
 /**
  * A Servlet {@link Filter} that translates the {@code X-Forwarded-Client} HTTP header to the {@code javax.servlet.request.X509Certificate} Servlet attribute.  This implementation handles both
@@ -54,8 +58,6 @@ final class ClientCertificateMapper implements Filter {
     static final String ATTRIBUTE = "javax.servlet.request.X509Certificate";
 
     static final String HEADER = "X-Forwarded-Client-Cert";
-
-    private static final List<String> XFCC_KEYS = Arrays.asList("By=", "Hash=", "Cert=", "Chain=", "Subject=", "URI=", "DNS=");
 
     private static final String CACHE_ENABLED_PROPERTY = "org.cloudfoundry.router.certificate.cache.enabled";
 
@@ -100,7 +102,8 @@ final class ClientCertificateMapper implements Filter {
                 if (!certificates.isEmpty()) {
                     request.setAttribute(ATTRIBUTE, certificates.toArray(new X509Certificate[0]));
                 }
-            } catch (CertificateException e) {
+            // IllegalArgumentException: malformed %xx in URL-encoded cert value; treat same as parse failure
+            } catch (CertificateException | IllegalArgumentException e) {
                 this.logger.warning("Unable to parse certificates in X-Forwarded-Client-Cert");
             }
             // Only wrap when the header is actually present — avoids allocation on requests without a cert.
@@ -115,67 +118,6 @@ final class ClientCertificateMapper implements Filter {
     @Override
     public void init(FilterConfig filterConfig) {
 
-    }
-
-    private boolean isXfccFormat(String value) {
-        for (String key : XFCC_KEYS) {
-            if (value.regionMatches(true, 0, key, 0, key.length())) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    /**
-     * Extracts a field value from an XFCC entry. Keys are matched case-insensitively.
-     * Quoted values (e.g. Subject="/C=US;L=SF") are returned without the surrounding quotes.
-     * Note: a quoted value containing a literal ";" will be split at that semicolon
-     * by the outer loop in {@link #parseCertificate}, but this is harmless for the
-     * URL-encoded fields (Cert, Chain, Hash) this mapper actually reads.
-     */
-    private String extractFieldFromXfcc(String xfccEntry, String fieldPrefix) {
-        int start = 0;
-        int len = xfccEntry.length();
-        while (start < len) {
-            int end = findFieldEnd(xfccEntry, start, len);
-            if (xfccEntry.regionMatches(true, start, fieldPrefix, 0, fieldPrefix.length())) {
-                String value = xfccEntry.substring(start + fieldPrefix.length(), end);
-                if (value.length() >= 2 && value.charAt(0) == '"' && value.charAt(value.length() - 1) == '"') {
-                    value = value.substring(1, value.length() - 1).replace("\\\"", "\"");
-                }
-                return value;
-            }
-            start = end + 1;
-        }
-        return null;
-    }
-
-    /**
-     * Returns the end index (exclusive) of the current field starting at {@code start}.
-     * Respects double-quoted values so that a {@code ;} inside quotes is not treated as
-     * a field separator (e.g. {@code Subject="/C=US;L=SF"}).
-     */
-    private int findFieldEnd(String entry, int start, int len) {
-        int eq = entry.indexOf('=', start);
-        if (eq < 0) return len;
-        int valueStart = eq + 1;
-        if (valueStart < len && entry.charAt(valueStart) == '"') {
-            int i = valueStart + 1;
-            while (i < len) {
-                char c = entry.charAt(i);
-                if (c == '\\') {
-                    i += 2;
-                } else if (c == '"') {
-                    i++;
-                    return i; // end is after closing quote
-                } else {
-                    i++;
-                }
-            }
-            return len;
-        }
-        int semi = entry.indexOf(';', valueStart);
-        return semi < 0 ? len : semi;
     }
 
     private byte[] decodeHeader(String rawCertificate) {
@@ -196,35 +138,28 @@ final class ClientCertificateMapper implements Filter {
         }
     }
 
-    private String xfccFieldNames(String xfccEntry) {
-        StringBuilder names = new StringBuilder();
-        for (String key : XFCC_KEYS) {
-            if (extractFieldFromXfcc(xfccEntry, key) != null) {
-                if (names.length() > 0) names.append(", ");
-                names.append(key, 0, key.length() - 1); // strip trailing '='
+    private X509Certificate parseCertificate(String rawValue, XfccEntry xfcc) throws CertificateException, IOException {
+        if (xfcc.resemblesXfcc()) {
+            if (this.logger.isLoggable(java.util.logging.Level.FINE)) {
+                this.logger.fine("XFCC entry received with fields: " + xfcc.fieldNames());
             }
-        }
-        return names.toString();
-    }
-
-    private X509Certificate parseCertificate(String rawValue) throws CertificateException, IOException {
-        if (isXfccFormat(rawValue)) {
-            this.logger.fine("XFCC entry received with fields: " + xfccFieldNames(rawValue));
-            String hash = extractFieldFromXfcc(rawValue, "Hash=");
+            String hash = xfcc.get(XfccField.HASH);
+            if (xfcc.hasField(XfccField.HASH) && !XfccHeaderParser.isValidSha256Hex(hash)) {
+                this.logger.warning("X-Forwarded-Client-Cert Hash= value does not look like a SHA-256 hex digest");
+            }
             if (hash != null && this.certificateCache != null) {
                 X509Certificate cached = this.certificateCache.get(hash);
                 if (cached != null) {
                     return cached;
                 }
             }
-            String certData = extractFieldFromXfcc(rawValue, "Cert=");
-            if (certData == null) {
-                certData = extractFieldFromXfcc(rawValue, "Chain=");
-            }
-            if (certData == null) {
+            if (!xfcc.hasField(XfccField.CERT)) {
+                if (xfcc.hasField(XfccField.CHAIN)) {
+                    this.logger.warning("X-Forwarded-Client-Cert contains Chain= but no Cert= field; Chain= is not supported and the certificate will not be mapped.");
+                }
                 return null;
             }
-            X509Certificate cert = generateCertificate(certData);
+            X509Certificate cert = generateCertificate(xfcc.get(XfccField.CERT));
             if (hash != null && this.certificateCache != null && this.certificateCache.size() < MAX_CACHE_SIZE) {
                 this.certificateCache.put(hash, cert);
             }
@@ -251,7 +186,7 @@ final class ClientCertificateMapper implements Filter {
             return rawValue;
         }
         try {
-            byte[] digest = MessageDigest.getInstance("SHA-256").digest(rawValue.getBytes(StandardCharsets.UTF_8));
+            byte[] digest = MessageDigest.getInstance("SHA-256").digest(rawValue.getBytes(UTF_8));
             StringBuilder sb = new StringBuilder(digest.length * 2);
             for (byte b : digest) {
                 sb.append(String.format("%02x", b));
@@ -266,7 +201,9 @@ final class ClientCertificateMapper implements Filter {
         List<X509Certificate> certificates = new ArrayList<>();
 
         for (String rawValue : getRawCertificates(request)) {
-            X509Certificate cert = parseCertificate(rawValue);
+            XfccEntry xfcc = new XfccEntry(rawValue);
+            setXfccAttributes(request, xfcc);
+            X509Certificate cert = parseCertificate(rawValue, xfcc);
             if (cert != null) {
                 certificates.add(cert);
             }
@@ -275,37 +212,41 @@ final class ClientCertificateMapper implements Filter {
         return certificates;
     }
 
-    private List<String> getRawCertificates(HttpServletRequest request) {
-        Enumeration<String> candidates = request.getHeaders(HEADER);
-
-        if (candidates == null) {
-            return Collections.emptyList();
+    private void setXfccAttributes(HttpServletRequest request, XfccEntry xfcc) {
+        if (!xfcc.resemblesXfcc()) {
+            return;
         }
-
-        List<String> rawCertificates = new ArrayList<>();
-        while (candidates.hasMoreElements()) {
-            String candidate = candidates.nextElement();
-
-            if (candidate == null || candidate.isEmpty()) {
-                continue;
-            }
-
-            if (hasMultipleCertificates(candidate)) {
-                for (String part : candidate.split(",")) {
-                    if (!part.isEmpty()) {
-                        rawCertificates.add(part);
-                    }
-                }
-            } else {
-                rawCertificates.add(candidate);
-            }
+        if (request.getAttribute(XfccAttributes.HASH) == null && xfcc.hasField(XfccField.HASH)) {
+            request.setAttribute(XfccAttributes.HASH, xfcc.get(XfccField.HASH));
         }
-
-        return rawCertificates;
+        if (request.getAttribute(XfccAttributes.SUBJECT) == null && xfcc.hasField(XfccField.SUBJECT)) {
+            String subject = xfcc.get(XfccField.SUBJECT);
+            request.setAttribute(XfccAttributes.SUBJECT, subject);
+            setCfSubjectAttributes(request, subject);
+        }
     }
 
-    private boolean hasMultipleCertificates(String candidate) {
-        return candidate.indexOf(',') != -1;
+    private void setCfSubjectAttributes(HttpServletRequest request, String subject) {
+        CfSubjectDn dn = XfccHeaderParser.parseCfSubjectDn(subject);
+        if (dn == null) {
+            return;
+        }
+        if (request.getAttribute(XfccAttributes.APP_GUID) == null && dn.appGuid != null) {
+            request.setAttribute(XfccAttributes.APP_GUID, dn.appGuid);
+        }
+        if (request.getAttribute(XfccAttributes.SPACE_GUID) == null && dn.spaceGuid != null) {
+            request.setAttribute(XfccAttributes.SPACE_GUID, dn.spaceGuid);
+        }
+        if (request.getAttribute(XfccAttributes.ORG_GUID) == null && dn.orgGuid != null) {
+            request.setAttribute(XfccAttributes.ORG_GUID, dn.orgGuid);
+        }
+        if (request.getAttribute(XfccAttributes.INSTANCE_GUID) == null && dn.instanceGuid != null) {
+            request.setAttribute(XfccAttributes.INSTANCE_GUID, dn.instanceGuid);
+        }
+    }
+
+    private List<String> getRawCertificates(HttpServletRequest request) {
+        return XfccHeaderParser.splitHeaderValues(Collections.list(request.getHeaders(HEADER)));
     }
 
     private static final class XfccStrippingRequestWrapper extends HttpServletRequestWrapper {
@@ -316,13 +257,17 @@ final class ClientCertificateMapper implements Filter {
 
         @Override
         public String getHeader(String name) {
-            if (HEADER.equalsIgnoreCase(name)) return null;
+            if (HEADER.equalsIgnoreCase(name)) {
+                return null;
+            }
             return super.getHeader(name);
         }
 
         @Override
         public Enumeration<String> getHeaders(String name) {
-            if (HEADER.equalsIgnoreCase(name)) return Collections.emptyEnumeration();
+            if (HEADER.equalsIgnoreCase(name)) {
+                return Collections.emptyEnumeration();
+            }
             return super.getHeaders(name);
         }
 
