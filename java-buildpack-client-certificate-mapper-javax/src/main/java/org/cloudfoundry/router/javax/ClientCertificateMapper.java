@@ -29,6 +29,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.UnsupportedEncodingException;
 import java.net.URLDecoder;
+import java.nio.charset.StandardCharsets;
 import java.security.cert.CertificateException;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
@@ -37,6 +38,7 @@ import java.util.Base64;
 import java.util.Collections;
 import java.util.Enumeration;
 import java.util.List;
+import java.util.logging.Level;
 import org.cloudfoundry.router.CertificateCache;
 import java.util.logging.Logger;
 import org.cloudfoundry.router.CfSubjectDn;
@@ -67,10 +69,14 @@ final class ClientCertificateMapper implements Filter {
 
     private final CertificateFactory certificateFactory;
 
-    /** Cache keyed by XFCC {@code Hash=} fingerprint (for XFCC entries) or the full raw header value (for raw certs).
+    /** Cache keyed by XFCC {@code Cert=} value (for XFCC entries) or the full raw header value (for raw certs).
+     *  Using {@code Cert=} as the key for XFCC entries is a security requirement: the {@code Hash=} field is
+     *  supplied by the caller and can be forged by external clients when header stripping is not enabled.
+     *  Keying by the actual certificate bytes ensures only a request carrying the full certificate can get a hit.
      *  {@code null} when caching is disabled.
-     *  Memory note: raw cert keys are ~2–4 KB each; with two generations of {@value #DEFAULT_CACHE_SIZE} entries each
-     *  (default) the cache may hold up to ~256 entries (~1.5 MB total key+cert data). See {@link CertificateCache}.
+     *  Memory note: XFCC cert keys are ~2–4 KB each; raw cert keys are also ~2–4 KB; with two generations of
+     *  {@value #DEFAULT_CACHE_SIZE} entries each (default) the cache may hold up to ~256 entries (~1.5 MB total
+     *  key+cert data). See {@link CertificateCache}.
      *  Note: cached entries are not expiry-checked on retrieval — the filter does not validate cert validity
      *  on cache hits (nor on misses), consistent with the behaviour before caching was introduced. */
     private final CertificateCache certificateCache;
@@ -139,7 +145,7 @@ final class ClientCertificateMapper implements Filter {
             return Base64.getDecoder().decode(rawCertificate);
         } catch (IllegalArgumentException e1) {
             try {
-                return URLDecoder.decode(rawCertificate, "utf-8").getBytes();
+                return URLDecoder.decode(rawCertificate, "utf-8").getBytes(StandardCharsets.UTF_8);
             } catch (UnsupportedEncodingException e2) {
                 throw new IllegalArgumentException("Header contains value that is neither base64 nor url encoded");
             }
@@ -154,18 +160,11 @@ final class ClientCertificateMapper implements Filter {
 
     private X509Certificate parseCertificate(String rawValue, XfccEntry xfcc) throws CertificateException, IOException {
         if (xfcc.resemblesXfcc()) {
-            if (this.logger.isLoggable(java.util.logging.Level.FINE)) {
+            if (this.logger.isLoggable(Level.FINE)) {
                 this.logger.fine("XFCC entry received with fields: " + xfcc.fieldNames());
             }
-            String hash = xfcc.get(XfccField.HASH);
-            if (xfcc.hasField(XfccField.HASH) && !XfccHeaderParser.isValidSha256Hex(hash)) {
+            if (xfcc.hasField(XfccField.HASH) && !XfccHeaderParser.isValidSha256Hex(xfcc.get(XfccField.HASH))) {
                 this.logger.warning("X-Forwarded-Client-Cert Hash= value does not look like a SHA-256 hex digest");
-            }
-            if (hash != null && this.certificateCache != null) {
-                X509Certificate cached = this.certificateCache.get(hash);
-                if (cached != null) {
-                    return cached;
-                }
             }
             if (!xfcc.hasField(XfccField.CERT)) {
                 if (xfcc.hasField(XfccField.CHAIN)) {
@@ -173,9 +172,18 @@ final class ClientCertificateMapper implements Filter {
                 }
                 return null;
             }
-            X509Certificate cert = generateCertificate(xfcc.get(XfccField.CERT));
-            if (hash != null && this.certificateCache != null) {
-                this.certificateCache.put(hash, cert);
+            String certValue = xfcc.get(XfccField.CERT);
+            // Cache keyed by Cert= value (not Hash=): Hash= can be injected by external clients when
+            // header stripping is not enabled, making it unsafe as a standalone cache key.
+            if (this.certificateCache != null) {
+                X509Certificate cached = this.certificateCache.get(certValue);
+                if (cached != null) {
+                    return cached;
+                }
+            }
+            X509Certificate cert = generateCertificate(certValue);
+            if (this.certificateCache != null) {
+                this.certificateCache.put(certValue, cert);
             }
             return cert;
         }
@@ -260,16 +268,36 @@ final class ClientCertificateMapper implements Filter {
         }
 
         @Override
+        public long getDateHeader(String name) {
+            if (HEADER.equalsIgnoreCase(name)) {
+                return -1;
+            }
+            return super.getDateHeader(name);
+        }
+
+        @Override
+        public int getIntHeader(String name) {
+            if (HEADER.equalsIgnoreCase(name)) {
+                return -1;
+            }
+            return super.getIntHeader(name);
+        }
+
+        @Override
         public Enumeration<String> getHeaders(String name) {
             if (HEADER.equalsIgnoreCase(name)) {
-                return Collections.emptyEnumeration();
+                return Collections.enumeration(Collections.<String>emptyList());
             }
             return super.getHeaders(name);
         }
 
         @Override
         public Enumeration<String> getHeaderNames() {
-            List<String> names = Collections.list(super.getHeaderNames());
+            Enumeration<String> orig = super.getHeaderNames();
+            if (orig == null) {
+                return null;
+            }
+            List<String> names = Collections.list(orig);
             names.removeIf(name -> HEADER.equalsIgnoreCase(name));
             return Collections.enumeration(names);
         }

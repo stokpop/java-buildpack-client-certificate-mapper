@@ -29,7 +29,7 @@ Enables or disables certificate caching. When enabled, parsed `X509Certificate` 
 | `true` _(default)_ | Caching enabled |
 | `false` | Caching disabled; every request parses the certificate from scratch |
 
-**Cache key:** For XFCC-format headers the router-supplied `Hash=` field (64-byte SHA-256 hex) is used as the cache key directly. For raw (non-XFCC) headers the full header value string is used as the key — no computation overhead, and `String.hashCode()` is cached by the JVM after the first lookup.
+**Cache key:** For XFCC-format headers the `Cert=` field value is used as the cache key. Using `Hash=` as the key would be insecure: the `X-Forwarded-Client-Cert` header is not stripped by default, so external clients can inject arbitrary `Hash=` values and retrieve a cached certificate without presenting one. Keying by `Cert=` ensures only a request carrying the full certificate bytes can produce a cache hit. For raw (non-XFCC) headers the full header value string is used as the key — no computation overhead, and `String.hashCode()` is cached by the JVM after the first lookup.
 
 **Performance savings:** Parsing a `X509Certificate` from a DER/PEM header typically costs **50–500 µs** (ASN.1 parsing, key extraction). A cache hit costs **< 1 µs** (volatile read + map lookup) — a **100–500× reduction** per request. In a steady-state deployment where certs rotate daily, virtually all requests after the first per cert are cache hits.
 

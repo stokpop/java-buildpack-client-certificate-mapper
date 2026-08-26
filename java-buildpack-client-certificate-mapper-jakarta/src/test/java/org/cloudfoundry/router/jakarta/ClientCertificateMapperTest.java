@@ -432,4 +432,64 @@ public final class ClientCertificateMapperTest {
         }
     }
 
+    @Test
+    public void xfccCacheNoCertFieldSkipsCacheLookup() throws IOException, ServletException {
+        // A request with only Hash= (no Cert=) must not return a cached cert from a prior request.
+        String headerWithCert = "Hash=078c0ea84e084ea1c8bf4719ede79c5b078c0ea84e084ea1c8bf4719ede79c5b;Cert=" + NGINX_ESCAPED_CERT;
+        this.request.addHeader(ClientCertificateMapper.HEADER, headerWithCert);
+        this.mapper.doFilter(this.request, this.response, this.filterChain);
+        assertThat(this.request.getAttribute(ClientCertificateMapper.ATTRIBUTE)).isNotNull();
+
+        // Second request: same Hash= but no Cert=
+        MockHttpServletRequest request2 = new MockHttpServletRequest();
+        request2.addHeader(ClientCertificateMapper.HEADER,
+            "Hash=078c0ea84e084ea1c8bf4719ede79c5b078c0ea84e084ea1c8bf4719ede79c5b");
+        this.mapper.doFilter(request2, this.response, new MockFilterChain());
+
+        // Must not return a certificate — Cert= was absent, no cache hit allowed
+        assertThat(request2.getAttribute(ClientCertificateMapper.ATTRIBUTE)).isNull();
+    }
+
+    @Test
+    public void stripDateAndIntHeaderHideXfcc() throws IOException, ServletException, CertificateException {
+        System.setProperty("org.cloudfoundry.router.certificate.header.remove", "true");
+        try {
+            ClientCertificateMapper mapper = new ClientCertificateMapper();
+            this.request.addHeader(ClientCertificateMapper.HEADER, CERTIFICATE_1);
+            MockFilterChain chain = new MockFilterChain();
+            mapper.doFilter(this.request, this.response, chain);
+
+            HttpServletRequest downstream = (HttpServletRequest) chain.getRequest();
+            assertThat(downstream.getDateHeader(ClientCertificateMapper.HEADER)).isEqualTo(-1);
+            assertThat(downstream.getIntHeader(ClientCertificateMapper.HEADER)).isEqualTo(-1);
+        } finally {
+            System.clearProperty("org.cloudfoundry.router.certificate.header.remove");
+        }
+    }
+
+    @Test
+    public void stripGetHeaderNamesNullSafe() throws IOException, ServletException, CertificateException {
+        // Servlet spec permits getHeaderNames() to return null. Wrapping must not throw NPE.
+        System.setProperty("org.cloudfoundry.router.certificate.header.remove", "true");
+        try {
+            ClientCertificateMapper mapper = new ClientCertificateMapper();
+            // Use a custom request whose getHeaderNames() returns null
+            MockHttpServletRequest nullNamesRequest = new MockHttpServletRequest() {
+                @Override
+                public java.util.Enumeration<String> getHeaderNames() {
+                    return null;
+                }
+            };
+            nullNamesRequest.addHeader(ClientCertificateMapper.HEADER, CERTIFICATE_1);
+            MockFilterChain chain = new MockFilterChain();
+            mapper.doFilter(nullNamesRequest, this.response, chain);
+
+            HttpServletRequest downstream = (HttpServletRequest) chain.getRequest();
+            // Must return null, not throw
+            assertThat(downstream.getHeaderNames()).isNull();
+        } finally {
+            System.clearProperty("org.cloudfoundry.router.certificate.header.remove");
+        }
+    }
+
 }
