@@ -29,9 +29,6 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.UnsupportedEncodingException;
 import java.net.URLDecoder;
-import static java.nio.charset.StandardCharsets.UTF_8;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.security.cert.CertificateException;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
@@ -60,21 +57,23 @@ final class ClientCertificateMapper implements Filter {
 
     private static final String CACHE_ENABLED_PROPERTY = "org.cloudfoundry.router.certificate.cache.enabled";
 
-    private static final String RAW_CACHE_KEY_PROPERTY = "org.cloudfoundry.router.certificate.cache.raw.key";
-
     private static final String STRIP_HEADER_PROPERTY = "org.cloudfoundry.router.certificate.header.remove";
 
-    private static final int MAX_CACHE_SIZE = 1000;
+    private static final String CACHE_SIZE_PROPERTY = "org.cloudfoundry.router.certificate.cache.size";
+
+    private static final int DEFAULT_CACHE_SIZE = 128;
 
     private final Logger logger = Logger.getLogger(this.getClass().getName());
 
     private final CertificateFactory certificateFactory;
 
-    /** Cache keyed by XFCC {@code Hash=} fingerprint or derived raw-cert key. {@code null} when caching is disabled. */
+    /** Cache keyed by XFCC {@code Hash=} fingerprint (for XFCC entries) or the full raw header value (for raw certs).
+     *  {@code null} when caching is disabled.
+     *  Memory note: raw cert keys are ~2–4 KB each; with two generations of {@value #DEFAULT_CACHE_SIZE} entries each
+     *  (default) the cache may hold up to ~256 entries (~1.5 MB total key+cert data). See {@link CertificateCache}.
+     *  Note: cached entries are not expiry-checked on retrieval — the filter does not validate cert validity
+     *  on cache hits (nor on misses), consistent with the behaviour before caching was introduced. */
     private final CertificateCache certificateCache;
-
-    /** When {@code true}, the full raw header value is used as the cache key for non-XFCC certs; otherwise SHA-256 is used. */
-    private final boolean rawCacheKeyFull;
 
     /** When {@code true}, the {@code X-Forwarded-Client-Cert} header is hidden from downstream filters after parsing. */
     private final boolean stripXfccHeader;
@@ -82,8 +81,24 @@ final class ClientCertificateMapper implements Filter {
     ClientCertificateMapper() throws CertificateException {
         this.certificateFactory = CertificateFactory.getInstance("X.509");
         boolean cacheEnabled = !"false".equalsIgnoreCase(System.getProperty(CACHE_ENABLED_PROPERTY, "true"));
-        this.certificateCache = cacheEnabled ? new CertificateCache(MAX_CACHE_SIZE) : null;
-        this.rawCacheKeyFull = "full".equalsIgnoreCase(System.getProperty(RAW_CACHE_KEY_PROPERTY, "sha256"));
+        if (cacheEnabled) {
+            int cacheSize = DEFAULT_CACHE_SIZE;
+            String cacheSizeProp = System.getProperty(CACHE_SIZE_PROPERTY);
+            if (cacheSizeProp != null) {
+                try {
+                    cacheSize = Integer.parseInt(cacheSizeProp.trim());
+                    if (cacheSize <= 0) {
+                        this.logger.warning("Ignoring invalid " + CACHE_SIZE_PROPERTY + " value '" + cacheSizeProp + "'; using default " + DEFAULT_CACHE_SIZE);
+                        cacheSize = DEFAULT_CACHE_SIZE;
+                    }
+                } catch (NumberFormatException e) {
+                    this.logger.warning("Ignoring non-numeric " + CACHE_SIZE_PROPERTY + " value '" + cacheSizeProp + "'; using default " + DEFAULT_CACHE_SIZE);
+                }
+            }
+            this.certificateCache = new CertificateCache(cacheSize);
+        } else {
+            this.certificateCache = null;
+        }
         this.stripXfccHeader = "true".equalsIgnoreCase(System.getProperty(STRIP_HEADER_PROPERTY, "false"));
     }
 
@@ -164,34 +179,18 @@ final class ClientCertificateMapper implements Filter {
             }
             return cert;
         }
-        // Computing the cache key (SHA-256 or identity) is cheaper than parsing the raw value into an X509Certificate each time.
+        // Raw cert string used directly as cache key — zero compute overhead; String.hashCode() is cached after first use.
+        // Memory: ~2–4 KB per key; see field-level comment on certificateCache for total budget.
         if (this.certificateCache != null) {
-            String cacheKey = computeRawCacheKey(rawValue);
-            X509Certificate cached = this.certificateCache.get(cacheKey);
+            X509Certificate cached = this.certificateCache.get(rawValue);
             if (cached != null) {
                 return cached;
             }
             X509Certificate cert = generateCertificate(rawValue);
-            this.certificateCache.put(cacheKey, cert);
+            this.certificateCache.put(rawValue, cert);
             return cert;
         }
         return generateCertificate(rawValue);
-    }
-
-    private String computeRawCacheKey(String rawValue) {
-        if (this.rawCacheKeyFull) {
-            return rawValue;
-        }
-        try {
-            byte[] digest = MessageDigest.getInstance("SHA-256").digest(rawValue.getBytes(UTF_8));
-            StringBuilder sb = new StringBuilder(digest.length * 2);
-            for (byte b : digest) {
-                sb.append(String.format("%02x", b));
-            }
-            return sb.toString();
-        } catch (NoSuchAlgorithmException e) {
-            throw new RuntimeException("SHA-256 not available", e);
-        }
     }
 
     private List<X509Certificate> getCertificates(HttpServletRequest request) throws CertificateException, IOException {

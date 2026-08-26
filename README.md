@@ -29,16 +29,24 @@ Enables or disables certificate caching. When enabled, parsed `X509Certificate` 
 | `true` _(default)_ | Caching enabled |
 | `false` | Caching disabled; every request parses the certificate from scratch |
 
-### `org.cloudfoundry.router.certificate.cache.raw.key`
+**Cache key:** For XFCC-format headers the router-supplied `Hash=` field (64-byte SHA-256 hex) is used as the cache key directly. For raw (non-XFCC) headers the full header value string is used as the key — no computation overhead, and `String.hashCode()` is cached by the JVM after the first lookup.
 
-Applies only to raw (non-XFCC) headers. Controls how the cache key is derived from the raw header value. Computing the key is cheaper than creating a full `X509Certificate` object on every request.
+**Performance savings:** Parsing a `X509Certificate` from a DER/PEM header typically costs **50–500 µs** (ASN.1 parsing, key extraction). A cache hit costs **< 1 µs** (volatile read + map lookup) — a **100–500× reduction** per request. In a steady-state deployment where certs rotate daily, virtually all requests after the first per cert are cache hits.
+
+**Memory:** The cache uses a generational eviction strategy (two generations of up to 128 entries each, configurable via `org.cloudfoundry.router.certificate.cache.size`). Raw cert keys are typically 2–4 KB; with both generations full the cache holds ~256 `X509Certificate` objects plus ~1 MB of key strings, for a worst-case total of roughly **~1.5 MB**. Disable caching if this is a concern.
+
+**Security note:** Cached entries are not expiry-checked on retrieval. The filter does not validate certificate validity on cache hits (nor on misses) — consistent with behaviour before caching was introduced. Applications that require expiry enforcement should check `X509Certificate.checkValidity()` on the mapped request attribute.
+
+### `org.cloudfoundry.router.certificate.cache.size`
+
+Controls the number of entries per cache generation. The total number of cached certificates at any time is at most `2 × size`.
 
 | Value | Behaviour |
 |-------|-----------|
-| `sha256` _(default)_ | SHA-256 hex digest of the raw header value — compact key, negligible collision risk |
-| `full` | Full raw header value — zero collision risk, but stores a multi-KB string per cache entry |
+| `128` _(default)_ | ~256 entries max, ~1.5 MB worst-case memory |
+| any positive integer | Custom generation size; higher values trade more memory for fewer evictions |
 
-For XFCC-format headers the `Hash=` field provided by the router is used as the cache key directly (no computation needed).
+Invalid or non-positive values are ignored and the default is used (a warning is logged).
 
 ### `org.cloudfoundry.router.certificate.header.remove`
 

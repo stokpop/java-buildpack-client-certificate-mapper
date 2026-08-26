@@ -390,27 +390,6 @@ public final class ClientCertificateMapperTest {
     }
 
     @Test
-    public void rawCacheHitFullKey() throws IOException, ServletException, CertificateException {
-        System.setProperty("org.cloudfoundry.router.certificate.cache.raw.key", "full");
-        try {
-            ClientCertificateMapper mapper = new ClientCertificateMapper();
-            MockHttpServletRequest req1 = new MockHttpServletRequest();
-            req1.addHeader(ClientCertificateMapper.HEADER, CERTIFICATE_1);
-            mapper.doFilter(req1, this.response, new MockFilterChain());
-            X509Certificate first = ((X509Certificate[]) req1.getAttribute(ClientCertificateMapper.ATTRIBUTE))[0];
-
-            MockHttpServletRequest req2 = new MockHttpServletRequest();
-            req2.addHeader(ClientCertificateMapper.HEADER, CERTIFICATE_1);
-            mapper.doFilter(req2, this.response, new MockFilterChain());
-            X509Certificate second = ((X509Certificate[]) req2.getAttribute(ClientCertificateMapper.ATTRIBUTE))[0];
-
-            assertThat(second).isSameAs(first);
-        } finally {
-            System.clearProperty("org.cloudfoundry.router.certificate.cache.raw.key");
-        }
-    }
-
-    @Test
     public void stripXfccHeaderEnabled() throws IOException, ServletException, CertificateException {
         System.setProperty("org.cloudfoundry.router.certificate.header.remove", "true");
         try {

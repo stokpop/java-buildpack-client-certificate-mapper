@@ -28,6 +28,18 @@ import java.util.concurrent.ConcurrentHashMap;
  * a fresh current generation starts. This keeps memory bounded at approximately
  * {@code 2 * maxGenSize} entries while avoiding any locking on the read path.
  *
+ * <p><b>Memory budget.</b> Keys for XFCC entries are 64-byte SHA-256 hex strings (from the
+ * router-supplied {@code Hash=} field). Keys for raw (non-XFCC) entries are the full header
+ * value — typically 2–4 KB of base64/URL-encoded DER. With the default generation size of 128,
+ * the cache holds at most ~256 {@code X509Certificate} objects plus ~1 MB of raw-cert key
+ * strings, for a worst-case total of roughly 1.5 MB. If this is a concern, disable caching
+ * via the {@code org.cloudfoundry.router.certificate.cache.enabled} system property.
+ *
+ * <p><b>Security note.</b> Cached entries are not expiry-checked on retrieval. The filter
+ * does not validate certificate validity on cache hits (nor on misses), consistent with
+ * behaviour before caching was introduced. Callers that require expiry enforcement should
+ * check {@code X509Certificate.checkValidity()} on the mapped attribute themselves.
+ *
  * <p>The implementation is safe for concurrent use. Under a simultaneous rotation race,
  * at most a few entries may be re-parsed once — no data is corrupted.
  *
