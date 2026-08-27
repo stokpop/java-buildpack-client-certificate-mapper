@@ -2,7 +2,6 @@ name: CI
 
 on:
   push:
-    branches: [ main ]
     paths-ignore:
       - '.github/**'
       - 'README.md'
@@ -32,6 +31,17 @@ jobs:
 
       - name: Build and test
         run: ./mvnw -q package
+
+      - name: Upload jar artifact
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: java-buildpack-client-certificate-mapper
+          path: |
+            java-buildpack-client-certificate-mapper/target/*.jar
+            !java-buildpack-client-certificate-mapper/target/*-sources.jar
+            !java-buildpack-client-certificate-mapper/target/*-javadoc.jar
+            !java-buildpack-client-certificate-mapper/target/original-*.jar
+          if-no-files-found: error
 
   snapshot:
     needs: test
