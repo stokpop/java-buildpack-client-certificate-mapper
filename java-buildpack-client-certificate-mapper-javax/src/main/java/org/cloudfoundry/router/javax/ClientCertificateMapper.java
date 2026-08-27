@@ -87,8 +87,8 @@ final class ClientCertificateMapper implements Filter {
     ClientCertificateMapper() throws CertificateException {
         this.certificateFactory = CertificateFactory.getInstance("X.509");
         boolean cacheEnabled = !"false".equalsIgnoreCase(System.getProperty(CACHE_ENABLED_PROPERTY, "true"));
+        int cacheSize = DEFAULT_CACHE_SIZE;
         if (cacheEnabled) {
-            int cacheSize = DEFAULT_CACHE_SIZE;
             String cacheSizeProp = System.getProperty(CACHE_SIZE_PROPERTY);
             if (cacheSizeProp != null) {
                 try {
@@ -106,6 +106,28 @@ final class ClientCertificateMapper implements Filter {
             this.certificateCache = null;
         }
         this.stripXfccHeader = "true".equalsIgnoreCase(System.getProperty(STRIP_HEADER_PROPERTY, "false"));
+        logConfiguration(cacheEnabled, cacheSize);
+    }
+
+    /** Logs the effective filter configuration once at construction, so operators can confirm which
+     *  behaviour is active without having to reason about system property defaults. */
+    private void logConfiguration(boolean cacheEnabled, int cacheSize) {
+        if (!this.logger.isLoggable(Level.INFO)) {
+            return;
+        }
+        StringBuilder message = new StringBuilder("Mapping ").append(HEADER).append(" to the ").append(ATTRIBUTE).append(" request attribute; certificate cache ");
+        if (cacheEnabled) {
+            message.append("enabled (").append(CACHE_SIZE_PROPERTY).append('=').append(cacheSize).append(" entries per generation, up to ").append(2 * cacheSize).append(" cached certificates)");
+        } else {
+            message.append("disabled (").append(CACHE_ENABLED_PROPERTY).append("=false)");
+        }
+        message.append("; ").append(HEADER).append(" header stripping ");
+        if (this.stripXfccHeader) {
+            message.append("enabled (header hidden from downstream filters)");
+        } else {
+            message.append("disabled (").append(STRIP_HEADER_PROPERTY).append("=true to enable)");
+        }
+        this.logger.info(message.toString());
     }
 
     @Override

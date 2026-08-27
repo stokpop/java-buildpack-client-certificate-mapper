@@ -109,6 +109,46 @@ public final class CertificateCacheTest {
     }
 
     @Test
+    public void countersTrackHitsAndMisses() {
+        CertificateCache cache = new CertificateCache(10);
+        cache.put("key1", fakeCert());
+        cache.get("key1");
+        cache.get("key1");
+        cache.get("absent");
+
+        assertThat(cache.getHitCount()).isEqualTo(2);
+        assertThat(cache.getMissCount()).isEqualTo(1);
+        assertThat(cache.getRotationCount()).isZero();
+    }
+
+    @Test
+    public void rotationCountIsIncrementedOnEachRotation() {
+        CertificateCache cache = new CertificateCache(2);
+        cache.put("key1", fakeCert());
+        cache.put("key2", fakeCert());
+        cache.put("key3", fakeCert()); // first rotation
+        cache.put("key4", fakeCert());
+        cache.put("key5", fakeCert()); // second rotation
+
+        assertThat(cache.getRotationCount()).isEqualTo(2);
+    }
+
+    @Test
+    public void statisticsReportsHitRateAndCapacity() {
+        CertificateCache cache = new CertificateCache(2);
+        cache.put("key1", fakeCert());
+        cache.get("key1");
+        cache.get("absent");
+
+        assertThat(cache.statistics()).isEqualTo("rotations=0, hits=1, misses=1, hit rate=50%, capacity=4 certificates");
+    }
+
+    @Test
+    public void statisticsReportsZeroHitRateWithoutLookups() {
+        assertThat(new CertificateCache(8).statistics()).isEqualTo("rotations=0, hits=0, misses=0, hit rate=0%, capacity=16 certificates");
+    }
+
+    @Test
     public void currentGenEntryTakesPrecedenceOverPreviousGen() {
         CertificateCache cache = new CertificateCache(2);
         X509Certificate oldCert = fakeCert();
