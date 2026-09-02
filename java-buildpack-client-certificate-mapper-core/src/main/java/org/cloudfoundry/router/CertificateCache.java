@@ -32,13 +32,12 @@ import java.util.logging.Logger;
  * a fresh current generation starts. This keeps memory bounded at approximately
  * {@code 2 * maxGenSize} entries while avoiding any locking on the read path.
  *
- * <p><b>Memory budget.</b> Keys for XFCC entries are the {@code Cert=} field value (~2–4 KB of
- * URL-encoded PEM). Using the full {@code Cert=} value as the key is required for security: the
- * {@code Hash=} field can be injected by external clients when header stripping is disabled.
- * Keys for raw (non-XFCC) entries are the full header
- * value — typically 2–4 KB of base64/URL-encoded DER. With the default generation size of 128,
- * the cache holds at most ~256 {@code X509Certificate} objects plus ~1 MB of raw-cert key
- * strings, for a worst-case total of roughly 1.5 MB. If this is a concern, disable caching
+ * <p><b>Memory budget.</b> Keys are 64-character SHA-256 hex digests derived from the certificate
+ * bytes (either the XFCC {@code Cert=} field value or, for non-XFCC requests, the full raw header
+ * value). Deriving the key ensures only a request carrying the actual certificate can produce a
+ * hit, and keeps {@link String#hashCode()} and {@link String#equals(Object)} on the cache key cheap
+ * on every lookup. With the default generation size of 128, the cache holds at most ~256
+ * {@code X509Certificate} objects plus ~16 KB of key strings. If this is a concern, disable caching
  * via the {@code org.cloudfoundry.router.certificate.cache.enabled} system property.
  *
  * <p><b>Security note.</b> Cached entries are not expiry-checked on retrieval. The filter

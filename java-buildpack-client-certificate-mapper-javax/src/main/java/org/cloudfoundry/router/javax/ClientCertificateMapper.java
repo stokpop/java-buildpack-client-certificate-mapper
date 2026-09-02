@@ -30,6 +30,8 @@ import java.io.InputStream;
 import java.io.UnsupportedEncodingException;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.security.cert.CertificateException;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
@@ -39,8 +41,8 @@ import java.util.Collections;
 import java.util.Enumeration;
 import java.util.List;
 import java.util.logging.Level;
-import org.cloudfoundry.router.CertificateCache;
 import java.util.logging.Logger;
+import org.cloudfoundry.router.CertificateCache;
 import org.cloudfoundry.router.CfSubjectDn;
 import org.cloudfoundry.router.XfccAttributes;
 import org.cloudfoundry.router.XfccEntry;
@@ -69,14 +71,17 @@ final class ClientCertificateMapper implements Filter {
 
     private final CertificateFactory certificateFactory;
 
-    /** Cache keyed by XFCC {@code Cert=} value (for XFCC entries) or the full raw header value (for raw certs).
-     *  Using {@code Cert=} as the key for XFCC entries is a security requirement: the {@code Hash=} field is
-     *  supplied by the caller and can be forged by external clients when header stripping is not enabled.
-     *  Keying by the actual certificate bytes ensures only a request carrying the full certificate can get a hit.
+    /** Cache keyed by a 64-character SHA-256 hex digest of the certificate bytes.
+     *  Deriving the key ourselves — rather than trusting the XFCC {@code Hash=} field — avoids identity
+     *  substitution: the header is not stripped by default, so external clients could inject any
+     *  {@code Hash=} value. Deriving from the {@code Cert=} bytes (or the full raw header for non-XFCC
+     *  requests) ensures only a request carrying the actual certificate can produce a hit.
+     *  Using a short digest as the key keeps {@link String#hashCode()} and {@link String#equals(Object)}
+     *  cheap on every lookup, so cache hits recover the parsing cost they were meant to save.
      *  {@code null} when caching is disabled.
-     *  Memory note: XFCC cert keys are ~2–4 KB each; raw cert keys are also ~2–4 KB; with two generations of
-     *  {@value #DEFAULT_CACHE_SIZE} entries each (default) the cache may hold up to ~256 entries (~1.5 MB total
-     *  key+cert data). See {@link CertificateCache}.
+     *  Memory note: keys are 64 bytes; with two generations of {@value #DEFAULT_CACHE_SIZE} entries each
+     *  (default) the cache holds at most ~256 entries (~16 KB of key strings plus ~256 cert objects).
+     *  See {@link CertificateCache}.
      *  Note: cached entries are not expiry-checked on retrieval — the filter does not validate cert validity
      *  on cache hits (nor on misses), consistent with the behaviour before caching was introduced. */
     private final CertificateCache certificateCache;
@@ -195,33 +200,62 @@ final class ClientCertificateMapper implements Filter {
                 return null;
             }
             String certValue = xfcc.get(XfccField.CERT);
-            // Cache keyed by Cert= value (not Hash=): Hash= can be injected by external clients when
-            // header stripping is not enabled, making it unsafe as a standalone cache key.
+            // Cache key is derived from the Cert= bytes we hold, not from the router-supplied Hash= field:
+            // Hash= can be injected by external clients when header stripping is not enabled. A short hex
+            // digest also keeps hashCode()/equals() on the cache key cheap on every lookup.
             if (this.certificateCache != null) {
-                X509Certificate cached = this.certificateCache.get(certValue);
+                String cacheKey = sha256Hex(certValue);
+                if (cacheKey != null) {
+                    X509Certificate cached = this.certificateCache.get(cacheKey);
+                    if (cached != null) {
+                        return cached;
+                    }
+                    X509Certificate cert = generateCertificate(certValue);
+                    this.certificateCache.put(cacheKey, cert);
+                    return cert;
+                }
+            }
+            return generateCertificate(certValue);
+        }
+        // Non-XFCC raw cert: derive the key from the full header value for the same reasons as above.
+        if (this.certificateCache != null) {
+            String cacheKey = sha256Hex(rawValue);
+            if (cacheKey != null) {
+                X509Certificate cached = this.certificateCache.get(cacheKey);
                 if (cached != null) {
                     return cached;
                 }
+                X509Certificate cert = generateCertificate(rawValue);
+                this.certificateCache.put(cacheKey, cert);
+                return cert;
             }
-            X509Certificate cert = generateCertificate(certValue);
-            if (this.certificateCache != null) {
-                this.certificateCache.put(certValue, cert);
-            }
-            return cert;
-        }
-        // Raw cert string used directly as cache key — zero compute overhead; String.hashCode() is cached after first use.
-        // Memory: ~2–4 KB per key; see field-level comment on certificateCache for total budget.
-        if (this.certificateCache != null) {
-            X509Certificate cached = this.certificateCache.get(rawValue);
-            if (cached != null) {
-                return cached;
-            }
-            X509Certificate cert = generateCertificate(rawValue);
-            this.certificateCache.put(rawValue, cert);
-            return cert;
         }
         return generateCertificate(rawValue);
     }
+
+    /** Returns the SHA-256 digest of {@code input} as 64 lowercase hex characters, or {@code null} if
+     *  the SHA-256 algorithm is unavailable (in which case the caller falls back to no caching for that
+     *  request rather than using an unsafe long key). MessageDigest instances are not thread-safe, so a
+     *  fresh one is obtained per call; the cost is dominated by the digest computation itself. */
+    private String sha256Hex(String input) {
+        MessageDigest md;
+        try {
+            md = MessageDigest.getInstance("SHA-256");
+        } catch (NoSuchAlgorithmException e) {
+            this.logger.warning("SHA-256 algorithm not available; skipping certificate cache for this request");
+            return null;
+        }
+        byte[] digest = md.digest(input.getBytes(StandardCharsets.UTF_8));
+        char[] out = new char[digest.length * 2];
+        for (int i = 0; i < digest.length; i++) {
+            int b = digest[i] & 0xff;
+            out[i * 2] = HEX[b >>> 4];
+            out[i * 2 + 1] = HEX[b & 0x0f];
+        }
+        return new String(out);
+    }
+
+    private static final char[] HEX = "0123456789abcdef".toCharArray();
 
     private List<X509Certificate> getCertificates(HttpServletRequest request) throws CertificateException, IOException {
         List<X509Certificate> certificates = new ArrayList<>();
