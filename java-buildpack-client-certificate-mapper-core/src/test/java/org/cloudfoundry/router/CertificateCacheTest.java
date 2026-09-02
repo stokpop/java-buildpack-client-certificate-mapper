@@ -34,6 +34,7 @@ import java.util.Date;
 import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 public final class CertificateCacheTest {
 
@@ -160,6 +161,95 @@ public final class CertificateCacheTest {
         // re-add key1 with a new cert in the fresh current gen
         cache.put("key1", newCert);
         assertThat(cache.get("key1")).isSameAs(newCert);
+    }
+
+    @Test
+    public void getOrComputeReturnsCachedValueOnHit() throws Exception {
+        CertificateCache cache = new CertificateCache(4);
+        X509Certificate cert = fakeCert();
+        cache.put("key1", cert);
+        java.util.concurrent.atomic.AtomicInteger supplierInvocations = new java.util.concurrent.atomic.AtomicInteger();
+
+        X509Certificate result = cache.getOrCompute("key1", () -> {
+            supplierInvocations.incrementAndGet();
+            return fakeCert();
+        });
+
+        assertThat(result).isSameAs(cert);
+        assertThat(supplierInvocations).hasValue(0);
+    }
+
+    @Test
+    public void getOrComputeInvokesSupplierExactlyOncePerKeyUnderConcurrentMiss() throws Exception {
+        // Reproduces the thundering-herd case: many threads with the same cache-cold key must
+        // trigger the supplier only once. This is the scenario that caused a parse-spike under
+        // 100 tps of identical XFCC headers before getOrCompute was introduced.
+        CertificateCache cache = new CertificateCache(128);
+        java.util.concurrent.atomic.AtomicInteger supplierInvocations = new java.util.concurrent.atomic.AtomicInteger();
+        X509Certificate sharedCert = fakeCert();
+        int threadCount = 100;
+        java.util.concurrent.CountDownLatch start = new java.util.concurrent.CountDownLatch(1);
+        java.util.concurrent.CountDownLatch done = new java.util.concurrent.CountDownLatch(threadCount);
+        java.util.concurrent.ExecutorService pool = java.util.concurrent.Executors.newFixedThreadPool(threadCount);
+        java.util.List<X509Certificate> results = java.util.Collections.synchronizedList(new java.util.ArrayList<>());
+
+        try {
+            for (int i = 0; i < threadCount; i++) {
+                pool.submit(() -> {
+                    try {
+                        start.await();
+                        results.add(cache.getOrCompute("shared-key", () -> {
+                            supplierInvocations.incrementAndGet();
+                            // Small pause so concurrent threads all reach computeIfAbsent while the
+                            // first supplier is still running — this is what a real cert parse does.
+                            try {
+                                Thread.sleep(20);
+                            } catch (InterruptedException ignored) {
+                                Thread.currentThread().interrupt();
+                            }
+                            return sharedCert;
+                        }));
+                    } catch (Exception e) {
+                        throw new RuntimeException(e);
+                    } finally {
+                        done.countDown();
+                    }
+                });
+            }
+            start.countDown();
+            assertThat(done.await(10, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+        } finally {
+            pool.shutdownNow();
+        }
+
+        assertThat(supplierInvocations).hasValue(1);
+        assertThat(results).hasSize(threadCount);
+        for (X509Certificate result : results) {
+            assertThat(result).isSameAs(sharedCert);
+        }
+    }
+
+    @Test
+    public void getOrComputeDoesNotCacheOnSupplierException() {
+        CertificateCache cache = new CertificateCache(4);
+
+        assertThatThrownBy(() -> cache.getOrCompute("key1", () -> {
+            throw new CertificateException("bad cert");
+        })).isInstanceOf(CertificateException.class).hasMessage("bad cert");
+
+        // Next call retries — no poisoned entry left behind.
+        java.util.concurrent.atomic.AtomicInteger invocations = new java.util.concurrent.atomic.AtomicInteger();
+        X509Certificate cert = fakeCert();
+        try {
+            X509Certificate result = cache.getOrCompute("key1", () -> {
+                invocations.incrementAndGet();
+                return cert;
+            });
+            assertThat(result).isSameAs(cert);
+            assertThat(invocations).hasValue(1);
+        } catch (Exception e) {
+            throw new AssertionError(e);
+        }
     }
 
 }

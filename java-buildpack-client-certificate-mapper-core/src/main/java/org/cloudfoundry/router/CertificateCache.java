@@ -16,6 +16,8 @@
 
 package org.cloudfoundry.router;
 
+import java.io.IOException;
+import java.security.cert.CertificateException;
 import java.security.cert.X509Certificate;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -31,6 +33,14 @@ import java.util.logging.Logger;
  * reaches {@code maxGenSize}, it is promoted to previous (the old previous is discarded) and
  * a fresh current generation starts. This keeps memory bounded at approximately
  * {@code 2 * maxGenSize} entries while avoiding any locking on the read path.
+ *
+ * <p><b>Concurrent parse deduplication.</b> {@link #getOrCompute(String, CertificateSupplier)} uses
+ * {@link ConcurrentHashMap#computeIfAbsent(Object, java.util.function.Function)} to serialize the
+ * miss path per key. When many threads race with the same cache-cold key (e.g. a burst of requests
+ * carrying the same XFCC header), only one thread invokes the supplier — the others wait briefly on
+ * the bucket lock and receive the computed result — avoiding a thundering-herd parse spike.
+ * Different keys never block each other. Prefer {@code getOrCompute} over the raw {@link #get} /
+ * {@link #put} pair on hot paths.
  *
  * <p><b>Why not key by the raw certificate string.</b> Using the full ~1.3 KB {@code Cert=} (or raw
  * header) value directly as the map key was measured to burn most of the cache's benefit: because
@@ -107,28 +117,108 @@ public final class CertificateCache {
             cert = prevGen.get(key);
         }
         if (cert == null) {
-            this.misses.increment();
-            if (LOGGER.isLoggable(Level.FINE)) {
-                LOGGER.fine("Certificate cache miss; the certificate will be parsed");
-            }
+            recordMiss();
             return null;
         }
-        this.hits.increment();
-        if (LOGGER.isLoggable(Level.FINE)) {
-            LOGGER.fine("Certificate cache hit; skipping certificate parsing");
-        }
+        recordHit();
         return cert;
     }
 
     /** Stores {@code cert} under {@code key}, rotating generations if the current one is full. */
     public void put(String key, X509Certificate cert) {
+        rotateIfFull();
+        currentGen.put(key, cert);
+    }
+
+    /**
+     * Returns the cached certificate for {@code key}, invoking {@code supplier} exactly once per key
+     * on a miss even when many threads race with the same key. This solves the cache-stampede
+     * ("thundering herd") case where a burst of concurrent requests carrying the same XFCC header
+     * would otherwise each parse the same certificate.
+     *
+     * <p>Serialization is achieved by delegating the miss path to
+     * {@link ConcurrentHashMap#computeIfAbsent(Object, java.util.function.Function)} on the current
+     * generation. That call locks only the target bucket while the mapping function runs, so
+     * concurrent callers with different keys never block each other. Callers with the same key have
+     * at most one thread actually parse; the rest wait briefly and receive the computed result.
+     *
+     * <p>If {@code supplier} throws, the exception is propagated to the caller and no entry is
+     * stored; the next request retries the parse.
+     */
+    public X509Certificate getOrCompute(String key, CertificateSupplier supplier)
+            throws CertificateException, IOException {
+        // Fast path: no lock, no wait for concurrent parsers.
+        X509Certificate cert = currentGen.get(key);
+        if (cert != null) {
+            recordHit();
+            return cert;
+        }
+        cert = prevGen.get(key);
+        if (cert != null) {
+            recordHit();
+            return cert;
+        }
+        // Rotate before entering computeIfAbsent — the mapping function must not mutate currentGen.
+        rotateIfFull();
+        try {
+            return currentGen.computeIfAbsent(key, k -> {
+                recordMiss();
+                try {
+                    return supplier.parse();
+                } catch (CertificateException | IOException e) {
+                    throw new WrappedCheckedException(e);
+                }
+            });
+        } catch (WrappedCheckedException e) {
+            Throwable cause = e.getCause();
+            if (cause instanceof CertificateException) {
+                throw (CertificateException) cause;
+            }
+            if (cause instanceof IOException) {
+                throw (IOException) cause;
+            }
+            throw new RuntimeException(cause);
+        }
+    }
+
+    private void rotateIfFull() {
         if (currentGen.size() >= maxGenSize) {
             prevGen = currentGen;
             currentGen = new ConcurrentHashMap<>();
             this.rotations.increment();
             logRotation();
         }
-        currentGen.put(key, cert);
+    }
+
+    private void recordHit() {
+        this.hits.increment();
+        if (LOGGER.isLoggable(Level.FINE)) {
+            LOGGER.fine("Certificate cache hit; skipping certificate parsing");
+        }
+    }
+
+    private void recordMiss() {
+        this.misses.increment();
+        if (LOGGER.isLoggable(Level.FINE)) {
+            LOGGER.fine("Certificate cache miss; the certificate will be parsed");
+        }
+    }
+
+    /** Supplies an {@link X509Certificate} on a cache miss. */
+    @FunctionalInterface
+    public interface CertificateSupplier {
+
+        X509Certificate parse() throws CertificateException, IOException;
+    }
+
+    /** Carries a checked exception out of {@link ConcurrentHashMap#computeIfAbsent}. */
+    private static final class WrappedCheckedException extends RuntimeException {
+
+        private static final long serialVersionUID = 1L;
+
+        WrappedCheckedException(Throwable cause) {
+            super(cause);
+        }
     }
 
     /** Returns the number of lookups that were served from the cache. */

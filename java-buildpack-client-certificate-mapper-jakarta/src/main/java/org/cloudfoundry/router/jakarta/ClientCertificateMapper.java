@@ -206,13 +206,7 @@ final class ClientCertificateMapper implements Filter {
             if (this.certificateCache != null) {
                 String cacheKey = sha256Hex(certValue);
                 if (cacheKey != null) {
-                    X509Certificate cached = this.certificateCache.get(cacheKey);
-                    if (cached != null) {
-                        return cached;
-                    }
-                    X509Certificate cert = generateCertificate(certValue);
-                    this.certificateCache.put(cacheKey, cert);
-                    return cert;
+                    return this.certificateCache.getOrCompute(cacheKey, () -> generateCertificate(certValue));
                 }
             }
             return generateCertificate(certValue);
@@ -221,13 +215,7 @@ final class ClientCertificateMapper implements Filter {
         if (this.certificateCache != null) {
             String cacheKey = sha256Hex(rawValue);
             if (cacheKey != null) {
-                X509Certificate cached = this.certificateCache.get(cacheKey);
-                if (cached != null) {
-                    return cached;
-                }
-                X509Certificate cert = generateCertificate(rawValue);
-                this.certificateCache.put(cacheKey, cert);
-                return cert;
+                return this.certificateCache.getOrCompute(cacheKey, () -> generateCertificate(rawValue));
             }
         }
         return generateCertificate(rawValue);
