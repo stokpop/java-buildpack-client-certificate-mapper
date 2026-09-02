@@ -36,7 +36,11 @@ import java.util.logging.Logger;
  * bytes (either the XFCC {@code Cert=} field value or, for non-XFCC requests, the full raw header
  * value). Deriving the key ensures only a request carrying the actual certificate can produce a
  * hit, and keeps {@link String#hashCode()} and {@link String#equals(Object)} on the cache key cheap
- * on every lookup. With the default generation size of 128, the cache holds at most ~256
+ * on every lookup. Note that the digest is taken over the header string as received — the
+ * URL-encoded PEM or base64 DER — not over the decoded DER bytes, so the key intentionally differs
+ * from the Envoy XFCC {@code Hash=} field (which is defined as SHA-256 of the DER). This is fine
+ * for cache identity (same header value produces the same key) but means the two hashes are not
+ * cross-comparable. With the default generation size of 128, the cache holds at most ~256
  * {@code X509Certificate} objects plus ~16 KB of key strings. If this is a concern, disable caching
  * via the {@code org.cloudfoundry.router.certificate.cache.enabled} system property.
  *

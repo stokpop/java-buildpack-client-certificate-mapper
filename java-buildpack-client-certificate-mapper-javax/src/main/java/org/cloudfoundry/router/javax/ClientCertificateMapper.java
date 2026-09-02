@@ -236,7 +236,10 @@ final class ClientCertificateMapper implements Filter {
     /** Returns the SHA-256 digest of {@code input} as 64 lowercase hex characters, or {@code null} if
      *  the SHA-256 algorithm is unavailable (in which case the caller falls back to no caching for that
      *  request rather than using an unsafe long key). MessageDigest instances are not thread-safe, so a
-     *  fresh one is obtained per call; the cost is dominated by the digest computation itself. */
+     *  fresh one is obtained per call; the cost is dominated by the digest computation itself.
+     *  Note: {@code input} is the URL-encoded PEM or base64 DER header value — not the decoded DER —
+     *  so this digest intentionally differs from the Envoy XFCC {@code Hash=} field. This is fine for
+     *  cache identity but the two values must not be compared. */
     private String sha256Hex(String input) {
         MessageDigest md;
         try {
