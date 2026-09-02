@@ -32,6 +32,21 @@ import java.util.logging.Logger;
  * a fresh current generation starts. This keeps memory bounded at approximately
  * {@code 2 * maxGenSize} entries while avoiding any locking on the read path.
  *
+ * <p><b>Why not key by the raw certificate string.</b> Using the full ~1.3 KB {@code Cert=} (or raw
+ * header) value directly as the map key was measured to burn most of the cache's benefit: because
+ * each request produces a fresh {@code String} instance from XFCC substring parsing,
+ * {@link String#hashCode()} cannot be reused across requests and traverses the whole key on every
+ * lookup, and a hit also requires a full-length {@link String#equals(Object)}. JMH measurement on
+ * JDK 25 (single-threaded, {@code AverageTime}, 5+5 iterations × 2 forks):
+ * <pre>
+ *   parse the cert every call (no cache):            ~3620 ns/op
+ *   cache hit keyed by the raw ~1.3 KB cert string:  ~1890 ns/op  (only 1.9x vs no cache)
+ *   cache hit keyed by 64-char SHA-256 hex digest:    ~130 ns/op  (28x vs no cache)
+ * </pre>
+ * Deriving a short digest recovers ~14.6x of the per-hit cost and — under real concurrent load —
+ * removes the compounded per-request CPU that made a raw-key cache measurably worse than no cache
+ * at all in field measurements.
+ *
  * <p><b>Memory budget.</b> Keys are 64-character SHA-256 hex digests derived from the certificate
  * bytes (either the XFCC {@code Cert=} field value or, for non-XFCC requests, the full raw header
  * value). Deriving the key ensures only a request carrying the actual certificate can produce a

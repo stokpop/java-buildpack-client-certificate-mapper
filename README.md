@@ -29,7 +29,17 @@ Enables or disables certificate caching. When enabled, parsed `X509Certificate` 
 | `true` _(default)_ | Caching enabled |
 | `false` | Caching disabled; every request parses the certificate from scratch |
 
-**Cache key:** The cache key is a 64-character SHA-256 hex digest derived from the certificate bytes: for XFCC-format headers, the digest of the `Cert=` field value; for raw (non-XFCC) headers, the digest of the full header value. The digest is taken over the header string as received (URL-encoded PEM or base64 DER), not over the decoded DER bytes — so this hash intentionally differs from the Envoy XFCC `Hash=` field (defined as SHA-256 of the DER) and the two values are not cross-comparable. The key is derived from the bytes we hold — not from the router-supplied `Hash=` field, which external clients can inject when header stripping is disabled — so only a request carrying the actual certificate can produce a cache hit. Using a short digest as the key also keeps `String.hashCode()` and `String.equals()` on every cache lookup cheap, so cache hits actually recover the parsing cost they were meant to save (measured ~28× faster than parsing on typical CF certificate sizes).
+**Cache key:** The cache key is a 64-character SHA-256 hex digest derived from the certificate bytes: for XFCC-format headers, the digest of the `Cert=` field value; for raw (non-XFCC) headers, the digest of the full header value. The digest is taken over the header string as received (URL-encoded PEM or base64 DER), not over the decoded DER bytes — so this hash intentionally differs from the Envoy XFCC `Hash=` field (defined as SHA-256 of the DER) and the two values are not cross-comparable. The key is derived from the bytes we hold — not from the router-supplied `Hash=` field, which external clients can inject when header stripping is disabled — so only a request carrying the actual certificate can produce a cache hit. Using a short digest as the key also keeps `String.hashCode()` and `String.equals()` on every cache lookup cheap, so cache hits actually recover the parsing cost they were meant to save.
+
+**Why a short derived key rather than the raw certificate string.** Using the full ~1.3 KB `Cert=` value directly as the map key was measured to burn most of the cache's benefit: every request produces a fresh `String` instance from XFCC substring parsing, so `String.hashCode()` cannot be reused across requests and traverses the whole key on every lookup (a hit also requires a full-length `String.equals()`). JMH on JDK 25 (single-threaded, average time, 5+5 iterations × 2 forks) using a typical ~1.3 KB CF app-identity certificate:
+
+| Strategy | ns/op | vs. no cache |
+| --- | --- | --- |
+| Parse the cert every call (no cache) | ~3620 | 1× (baseline) |
+| Cache hit keyed by raw ~1.3 KB cert string | ~1890 | 1.9× faster |
+| Cache hit keyed by 64-char SHA-256 hex digest | **~130** | **28× faster** |
+
+The short digest recovers ~14.6× of the per-hit cost. Under real concurrent load this compounded per-request CPU is what previously made a raw-key cache measurably worse than no cache at all.
 
 **Performance savings:** Parsing a `X509Certificate` from a DER/PEM header typically costs **50–500 µs** (ASN.1 parsing, key extraction). A cache hit costs **< 1 µs** (volatile read + map lookup) — a **100–500× reduction** per request. In a steady-state deployment where certs rotate daily, virtually all requests after the first per cert are cache hits.
 
