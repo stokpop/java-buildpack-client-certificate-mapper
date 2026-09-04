@@ -29,6 +29,7 @@ import java.security.cert.X509Certificate;
 import java.util.Collections;
 
 import org.cloudfoundry.router.XfccAttributes;
+import org.cloudfoundry.router.CertificateCache;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -492,4 +493,37 @@ public final class ClientCertificateMapperTest {
         }
     }
 
+    @Test
+    public void cacheSkippedForIdentityOnlyXfccButUsedForCert() throws Exception {
+        System.setProperty("org.cloudfoundry.router.certificate.cache.enabled", "true");
+        try {
+            ClientCertificateMapper mapper = new ClientCertificateMapper();
+            CertificateCache cache = mapper.certificateCache();
+            assertThat(cache).isNotNull();
+
+            // Identity-only XFCC (Hash+Subject, no Cert=): no certificate to parse, so the cache is bypassed entirely.
+            MockHttpServletRequest identityRequest = new MockHttpServletRequest();
+            identityRequest.addHeader(ClientCertificateMapper.HEADER,
+                "Hash=078c0ea84e084ea1c8bf4719ede79c5b078c0ea84e084ea1c8bf4719ede79c5b;Subject=\"/CN=client\"");
+            mapper.doFilter(identityRequest, new MockHttpServletResponse(), new MockFilterChain());
+            assertThat(cache.getMissCount()).isZero();
+            assertThat(cache.getHitCount()).isZero();
+
+            // XFCC carrying Cert=: parsed once (miss), then served from the cache (hit).
+            String certHeader = "Hash=078c0ea84e084ea1c8bf4719ede79c5b078c0ea84e084ea1c8bf4719ede79c5b;Cert=" + NGINX_ESCAPED_CERT;
+            MockHttpServletRequest certRequest1 = new MockHttpServletRequest();
+            certRequest1.addHeader(ClientCertificateMapper.HEADER, certHeader);
+            mapper.doFilter(certRequest1, new MockHttpServletResponse(), new MockFilterChain());
+            assertThat(cache.getMissCount()).isEqualTo(1);
+            assertThat(cache.getHitCount()).isZero();
+
+            MockHttpServletRequest certRequest2 = new MockHttpServletRequest();
+            certRequest2.addHeader(ClientCertificateMapper.HEADER, certHeader);
+            mapper.doFilter(certRequest2, new MockHttpServletResponse(), new MockFilterChain());
+            assertThat(cache.getMissCount()).isEqualTo(1);
+            assertThat(cache.getHitCount()).isEqualTo(1);
+        } finally {
+            System.clearProperty("org.cloudfoundry.router.certificate.cache.enabled");
+        }
+    }
 }

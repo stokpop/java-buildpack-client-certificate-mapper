@@ -7,7 +7,7 @@
 
 The `java-buildpack-client-certificate-mapper` is a Servlet filter that maps the [`X-Forwarded-Client-Cert`][xfcc] header to the `javax.servlet.request.X509Certificate` (javax) or `jakarta.servlet.request.X509Certificate` (jakarta) Servlet attribute. Both base64-encoded DER and URL-encoded PEM certificates, as well as [Envoy XFCC format][xfcc], are supported.
 
-It supports both the structured XFCC format (as produced by Cloud Foundry's Gorouter) and raw Base64/URL-encoded certificate headers (as produced by nginx).
+It supports both the structured XFCC field format (as produced by Envoy, and by CF Gorouter with `xfcc_format: envoy`) and raw Base64/URL-encoded certificate headers (as produced by nginx, and by CF Gorouter with `xfcc_format: raw`).
 
 ## Download
 
@@ -15,6 +15,101 @@ Pre-built jars are available on the [Releases page](https://github.com/cloudfoun
 
 - **Releases** — tagged versions (e.g. `v2.0.2`)
 - **Snapshot** — latest build from `main` (pre-release, updated on every push)
+
+## Usage
+
+Once the filter is mapped in your app, read the client certificate and the Cloud Foundry identity from the standard Servlet request attributes. Your application code does not need to depend on any class from this library.
+
+### Read the client certificate
+
+The parsed certificate chain is stored under the standard Servlet attribute. Use the `jakarta.` name on Jakarta Servlet containers (Tomcat 10+, Spring Boot 3+) or the `javax.` name on older containers:
+
+```java
+X509Certificate[] chain =
+    (X509Certificate[]) request.getAttribute("jakarta.servlet.request.X509Certificate");
+if (chain != null && chain.length > 0) {
+    X509Certificate clientCert = chain[0]; // leaf certificate
+    clientCert.checkValidity();            // optional: the filter does not enforce validity
+}
+```
+
+Spring MVC controllers can inject it directly with `@RequestAttribute`:
+
+```java
+@GetMapping("/whoami")
+String whoami(@RequestAttribute("jakarta.servlet.request.X509Certificate")
+              X509Certificate[] chain) {
+    return chain[0].getSubjectX500Principal().getName();
+}
+```
+
+### Read CF identity without the full certificate
+
+When the router forwards only `Hash=` and `Subject=` — as CF Gorouter does on an mTLS domain configured with `xfcc_format: envoy` — no `X509Certificate` is available, but the filter still parses the CF app identity from the Subject DN into request attributes:
+
+```java
+String appGuid   = (String) request.getAttribute("org.cloudfoundry.router.xfcc.app.guid");
+String spaceGuid = (String) request.getAttribute("org.cloudfoundry.router.xfcc.space.guid");
+String orgGuid   = (String) request.getAttribute("org.cloudfoundry.router.xfcc.org.guid");
+```
+
+See [Request attributes set from XFCC fields](#request-attributes-set-from-xfcc-fields) for the full list. Any attribute may be `null` — always null-check, since the header may be absent or carry only some fields.
+
+### Trust boundary and certificate validity
+
+This filter maps the incoming `X-Forwarded-Client-Cert` header **verbatim**. It does **not** verify certificate trust, validity, or that the caller proved possession of the private key. Those guarantees come entirely from whichever fronting proxy terminated the (mutual) TLS connection and set the header — CF Gorouter is one example, but the same applies to any router or gateway, inside or outside CF.
+
+The mapped attributes are therefore trustworthy **only** if requests reach your app exclusively via that trusted proxy, and any client-supplied copy of the header on untrusted inbound paths is stripped by it. Whether the proxy strips and replaces the header is a proxy configuration choice (e.g. CF Gorouter `forwarded_client_cert: sanitize_set`, or Envoy's default `SANITIZE`/`SANITIZE_SET`); pass-through modes (Gorouter `always_forward`, Envoy `ALWAYS_FORWARD_ONLY`) forward whatever the client sent. If your instance is reachable directly, bypassing the proxy, the header is attacker-controllable and no app-side check can recover the missing possession proof — a forwarded certificate proves only that the proxy *saw* it, not that the caller *holds* it.
+
+There are two distinct cases for what your app can check:
+
+- **Identity-only header (`Hash=` + `Subject=`, e.g. CF app-identity on an mTLS domain).** No `X509Certificate` is mapped, so your app **cannot** call `checkValidity()` — there are no certificate bytes. It does not need to: the proxy already required and validated the client certificate during the mTLS handshake (chain and validity period) before emitting the header, and CF instance-identity certificates are short-lived. Treat the `xfcc.*` attributes as a post-validation identity assertion, trusted transitively via the proxy.
+- **Full-certificate header (`Cert=`, or a raw certificate value).** An `X509Certificate` is mapped, so your app **can and should** enforce its own checks where appropriate — e.g. `cert.checkValidity()` and verifying the chain against a trusted CA — as defence in depth. This filter does none of that.
+
+## XFCC Header Format
+
+The filter supports base64-encoded DER certificates, URL-encoded PEM certificates, and the [Envoy XFCC format][xfcc]. In XFCC format, the header contains key-value fields such as `Hash=`, `Cert=`, and `Subject=`. Field names are matched case-insensitively. Multiple header values and the [RFC 9110][rfc9110] comma-delimited equivalent are both supported.
+
+The `Hash=` field (a SHA-256 fingerprint of the leaf certificate, set by the router) is recognised for format detection and optionally sanity-checked, but it cannot be mapped to an `X509Certificate` without a `Cert=` field.
+
+### XFCC detection and fallback behaviour
+
+An entry is detected as XFCC format when it structurally begins with a short (≤ 20 characters) all-letter key followed by `=`, **and** contains at least one of `Hash=`, `Cert=`, or `Chain=`. JSON format is not supported.
+
+If an entry passes the structural check but contains none of the recognised cert-related fields (e.g. only unknown future fields), it is treated as a raw certificate value; parsing will fail and a warning is logged. This preserves the same external behaviour as the raw-cert fallback path.
+
+### CF Gorouter XFCC fields
+
+CF Gorouter's XFCC output depends on the per-domain `xfcc_format` setting:
+
+- **`xfcc_format: envoy`** (used on mTLS domains such as CF app-identity) emits the compact field form `Hash=<sha256-hex>;Subject="<DN>"` — **only** `Hash=` and `Subject=`. Gorouter never emits a `Cert=` field in this mode.
+- **`xfcc_format: raw`** (the non-mTLS default) emits the **whole leaf certificate** as the base64 header value, with no `Hash=`/`Subject=`/`Cert=` field prefix.
+
+So the `Cert=` field this library parses comes from a real Envoy proxy (or another XFCC producer), not from Gorouter — Gorouter conveys the full certificate via the raw format instead. `By=`, `URI=`, and `DNS=` are not emitted for CF app-identity certs (they carry no URI/DNS SANs) and are not recognised by this library.
+
+### Request attributes set from XFCC fields
+
+When the header is in XFCC format, the filter sets the following request attributes (first entry that contains the field wins for multi-entry headers):
+
+| Attribute | Source | Value |
+|-----------|--------|-------|
+| `org.cloudfoundry.router.xfcc.hash` | `Hash=` | SHA-256 fingerprint of the client certificate |
+| `org.cloudfoundry.router.xfcc.subject` | `Subject=` | Full Subject DN of the client certificate |
+| `org.cloudfoundry.router.xfcc.app.guid` | `Subject=` `OU=app:<guid>` | CF app GUID parsed from the Subject DN |
+| `org.cloudfoundry.router.xfcc.space.guid` | `Subject=` `OU=space:<guid>` | CF space GUID parsed from the Subject DN |
+| `org.cloudfoundry.router.xfcc.org.guid` | `Subject=` `OU=organization:<guid>` | CF organization GUID parsed from the Subject DN |
+| `org.cloudfoundry.router.xfcc.instance.guid` | `Subject=` `CN=<guid>` | CF app instance GUID parsed from the Subject DN |
+
+The CF Subject DN format is: `CN=<instance-guid>,OU=app:<app-guid>,OU=space:<space-guid>,OU=organization:<org-guid>`.
+
+These attributes are set regardless of whether a `Cert=` field is present, so applications can identify the caller even when only a `Hash=` and `Subject=` are forwarded by the router.
+
+Unknown fields are silently skipped and logged at `FINE` level.
+
+**Specifications:**
+- [Envoy `x-forwarded-client-cert` header][xfcc] — XFCC field definitions (`Hash=`, `Cert=`, `Chain=`, `Subject=`)
+- [RFC 9110 §5.3][rfc9110] — HTTP header comma-delimited field values
+- [Jakarta Servlet 6.0 specification][servlet-spec] — `jakarta.servlet.request.X509Certificate` attribute
 
 ## Configuration
 
@@ -26,10 +121,14 @@ Enables or disables certificate caching. When enabled, parsed `X509Certificate` 
 
 | Value | Behaviour |
 |-------|-----------|
-| `true` _(default)_ | Caching enabled |
-| `false` | Caching disabled; every request parses the certificate from scratch |
+| `false` _(default)_ | Caching disabled; every request parses the certificate from scratch |
+| `true` | Caching enabled |
 
-**Cache key:** The cache key is a 64-character SHA-256 hex digest derived from the certificate bytes: for XFCC-format headers, the digest of the `Cert=` field value; for raw (non-XFCC) headers, the digest of the full header value. The digest is taken over the header string as received (URL-encoded PEM or base64 DER), not over the decoded DER bytes — so this hash intentionally differs from the Envoy XFCC `Hash=` field (defined as SHA-256 of the DER) and the two values are not cross-comparable. The key is derived from the bytes we hold — not from the router-supplied `Hash=` field, which external clients can inject when header stripping is disabled — so only a request carrying the actual certificate can produce a cache hit. Using a short digest as the key also keeps `String.hashCode()` and `String.equals()` on every cache lookup cheap, so cache hits actually recover the parsing cost they were meant to save.
+Caching is **opt-in** (disabled by default), like header stripping — enable it only where profiling shows the certificate parse is a measurable cost.
+
+**Only full-certificate headers are cached.** The cache exists to amortise the expensive ASN.1 parse of an actual certificate, so it is engaged only when the header carries a certificate to decode: an XFCC `Cert=` field, or a raw (non-XFCC) certificate value. Identity-only XFCC headers that carry just `Hash=`/`Subject=` (e.g. the CF app-identity headers on an mTLS domain) map no `X509Certificate` and are parsed inline regardless of this setting — caching them would only add a per-request SHA-256 keying cost for no benefit. See [Trust boundary and certificate validity](#trust-boundary-and-certificate-validity).
+
+**Cache key:** The cache key is a 64-character SHA-256 hex digest of the header entry as received — the full XFCC entry string (for entries carrying a `Cert=` field) or the raw certificate value (for non-XFCC headers). The digest is taken over the header string as received (URL-encoded PEM or base64 DER), not over the decoded DER bytes — so this hash intentionally differs from the Envoy XFCC `Hash=` field (defined as SHA-256 of the DER) and the two values are not cross-comparable. The key is derived from the bytes we hold — not from the router-supplied `Hash=` field, which external clients can inject when header stripping is disabled — so only a request carrying the actual certificate can produce a cache hit. Using a short digest as the key also keeps `String.hashCode()` and `String.equals()` on every cache lookup cheap, so cache hits actually recover the parsing cost they were meant to save.
 
 **Why a short derived key rather than the raw certificate string.** Using the full ~1.3 KB `Cert=` value directly as the map key was measured to burn most of the cache's benefit: every request produces a fresh `String` instance from XFCC substring parsing, so `String.hashCode()` cannot be reused across requests and traverses the whole key on every lookup (a hit also requires a full-length `String.equals()`). JMH on JDK 25 (single-threaded, average time, 5+5 iterations × 2 forks) using a typical ~1.3 KB CF app-identity certificate:
 
@@ -82,46 +181,6 @@ The project requires Java 8. To build and test from source:
 ```shell
 $ ./mvnw clean package
 ```
-
-## XFCC Header Format
-
-The filter supports base64-encoded DER certificates, URL-encoded PEM certificates, and the [Envoy XFCC format][xfcc]. In XFCC format, the header contains key-value fields such as `Hash=`, `Cert=`, and `Subject=`. Field names are matched case-insensitively. Multiple header values and the [RFC 9110][rfc9110] comma-delimited equivalent are both supported.
-
-The `Hash=` field (a SHA-256 fingerprint of the leaf certificate, set by the router) is recognised for format detection and optionally sanity-checked, but it cannot be mapped to an `X509Certificate` without a `Cert=` field.
-
-### XFCC detection and fallback behaviour
-
-An entry is detected as XFCC format when it structurally begins with a short (≤ 20 characters) all-letter key followed by `=`, **and** contains at least one of `Hash=`, `Cert=`, or `Chain=`. JSON format is not supported.
-
-If an entry passes the structural check but contains none of the recognised cert-related fields (e.g. only unknown future fields), it is treated as a raw certificate value; parsing will fail and a warning is logged. This preserves the same external behaviour as the raw-cert fallback path.
-
-### CF Gorouter XFCC fields
-
-CF Gorouter emits only `Hash=` and `Subject=` in the XFCC header. The `Cert=` field is emitted only when the router is configured to forward the full client certificate. `By=` may also be present as the proxy identity, but its value is **not** a Subject Alternative Name (SAN) — CF app identity certs do not carry URI SANs or DNS SANs, so `URI=` and `DNS=` are not emitted and are not recognised by this library.
-
-### Request attributes set from XFCC fields
-
-When the header is in XFCC format, the filter sets the following request attributes (first entry that contains the field wins for multi-entry headers):
-
-| Attribute | Source | Value |
-|-----------|--------|-------|
-| `org.cloudfoundry.router.xfcc.hash` | `Hash=` | SHA-256 fingerprint of the client certificate |
-| `org.cloudfoundry.router.xfcc.subject` | `Subject=` | Full Subject DN of the client certificate |
-| `org.cloudfoundry.router.xfcc.app.guid` | `Subject=` `OU=app:<guid>` | CF app GUID parsed from the Subject DN |
-| `org.cloudfoundry.router.xfcc.space.guid` | `Subject=` `OU=space:<guid>` | CF space GUID parsed from the Subject DN |
-| `org.cloudfoundry.router.xfcc.org.guid` | `Subject=` `OU=organization:<guid>` | CF organization GUID parsed from the Subject DN |
-| `org.cloudfoundry.router.xfcc.instance.guid` | `Subject=` `CN=<guid>` | CF app instance GUID parsed from the Subject DN |
-
-The CF Subject DN format is: `CN=<instance-guid>,OU=app:<app-guid>,OU=space:<space-guid>,OU=organization:<org-guid>`.
-
-These attributes are set regardless of whether a `Cert=` field is present, so applications can identify the caller even when only a `Hash=` and `Subject=` are forwarded by the router.
-
-Unknown fields are silently skipped and logged at `FINE` level.
-
-**Specifications:**
-- [Envoy `x-forwarded-client-cert` header][xfcc] — XFCC field definitions (`Hash=`, `Cert=`, `Chain=`, `Subject=`)
-- [RFC 9110 §5.3][rfc9110] — HTTP header comma-delimited field values
-- [Jakarta Servlet 6.0 specification][servlet-spec] — `jakarta.servlet.request.X509Certificate` attribute
 
 ## Error Handling
 
