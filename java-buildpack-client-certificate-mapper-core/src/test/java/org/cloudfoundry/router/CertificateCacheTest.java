@@ -70,6 +70,11 @@ public final class CertificateCacheTest {
         };
     }
 
+    /** Wraps a {@link X509Certificate} into a minimal {@link ParsedXfcc} cache entry (non-XFCC placeholder). */
+    private static ParsedXfcc fakeEntry() {
+        return new ParsedXfcc(new XfccEntry(""), fakeCert(), null);
+    }
+
     @Test
     public void getMissReturnsNull() {
         CertificateCache cache = new CertificateCache(10);
@@ -79,40 +84,40 @@ public final class CertificateCacheTest {
     @Test
     public void putAndGetReturnsSameInstance() {
         CertificateCache cache = new CertificateCache(10);
-        X509Certificate cert = fakeCert();
-        cache.put("key1", cert);
-        assertThat(cache.get("key1")).isSameAs(cert);
+        ParsedXfcc entry = fakeEntry();
+        cache.put("key1", entry);
+        assertThat(cache.get("key1")).isSameAs(entry);
     }
 
     @Test
     public void entryInPreviousGenerationIsStillReturned() {
         CertificateCache cache = new CertificateCache(2);
-        X509Certificate cert = fakeCert();
-        cache.put("key1", cert);
+        ParsedXfcc entry = fakeEntry();
+        cache.put("key1", entry);
         // fill current gen to trigger rotation
-        cache.put("key2", fakeCert());
-        cache.put("key3", fakeCert()); // triggers rotation: key1 moves to prevGen
-        assertThat(cache.get("key1")).isSameAs(cert);
+        cache.put("key2", fakeEntry());
+        cache.put("key3", fakeEntry()); // triggers rotation: key1 moves to prevGen
+        assertThat(cache.get("key1")).isSameAs(entry);
     }
 
     @Test
     public void entryEvictedAfterTwoRotations() {
         CertificateCache cache = new CertificateCache(2);
-        X509Certificate cert = fakeCert();
-        cache.put("key1", cert);
+        ParsedXfcc entry = fakeEntry();
+        cache.put("key1", entry);
         // first rotation: key1 goes to prevGen
-        cache.put("key2", fakeCert());
-        cache.put("key3", fakeCert());
+        cache.put("key2", fakeEntry());
+        cache.put("key3", fakeEntry());
         // second rotation: prevGen (with key1) is discarded
-        cache.put("key4", fakeCert());
-        cache.put("key5", fakeCert());
+        cache.put("key4", fakeEntry());
+        cache.put("key5", fakeEntry());
         assertThat(cache.get("key1")).isNull();
     }
 
     @Test
     public void countersTrackHitsAndMisses() {
         CertificateCache cache = new CertificateCache(10);
-        cache.put("key1", fakeCert());
+        cache.put("key1", fakeEntry());
         cache.get("key1");
         cache.get("key1");
         cache.get("absent");
@@ -125,11 +130,11 @@ public final class CertificateCacheTest {
     @Test
     public void rotationCountIsIncrementedOnEachRotation() {
         CertificateCache cache = new CertificateCache(2);
-        cache.put("key1", fakeCert());
-        cache.put("key2", fakeCert());
-        cache.put("key3", fakeCert()); // first rotation
-        cache.put("key4", fakeCert());
-        cache.put("key5", fakeCert()); // second rotation
+        cache.put("key1", fakeEntry());
+        cache.put("key2", fakeEntry());
+        cache.put("key3", fakeEntry()); // first rotation
+        cache.put("key4", fakeEntry());
+        cache.put("key5", fakeEntry()); // second rotation
 
         assertThat(cache.getRotationCount()).isEqualTo(2);
     }
@@ -137,45 +142,45 @@ public final class CertificateCacheTest {
     @Test
     public void statisticsReportsHitRateAndCapacity() {
         CertificateCache cache = new CertificateCache(2);
-        cache.put("key1", fakeCert());
+        cache.put("key1", fakeEntry());
         cache.get("key1");
         cache.get("absent");
 
-        assertThat(cache.statistics()).isEqualTo("rotations=0, hits=1, misses=1, hit rate=50%, capacity=4 certificates");
+        assertThat(cache.statistics()).isEqualTo("rotations=0, hits=1, misses=1, hit rate=50%, capacity=4 parsed XFCC entries");
     }
 
     @Test
     public void statisticsReportsZeroHitRateWithoutLookups() {
-        assertThat(new CertificateCache(8).statistics()).isEqualTo("rotations=0, hits=0, misses=0, hit rate=0%, capacity=16 certificates");
+        assertThat(new CertificateCache(8).statistics()).isEqualTo("rotations=0, hits=0, misses=0, hit rate=0%, capacity=16 parsed XFCC entries");
     }
 
     @Test
     public void currentGenEntryTakesPrecedenceOverPreviousGen() {
         CertificateCache cache = new CertificateCache(2);
-        X509Certificate oldCert = fakeCert();
-        X509Certificate newCert = fakeCert();
-        cache.put("key1", oldCert);
+        ParsedXfcc oldEntry = fakeEntry();
+        ParsedXfcc newEntry = fakeEntry();
+        cache.put("key1", oldEntry);
         // trigger rotation
-        cache.put("key2", fakeCert());
-        cache.put("key3", fakeCert());
-        // re-add key1 with a new cert in the fresh current gen
-        cache.put("key1", newCert);
-        assertThat(cache.get("key1")).isSameAs(newCert);
+        cache.put("key2", fakeEntry());
+        cache.put("key3", fakeEntry());
+        // re-add key1 with a new entry in the fresh current gen
+        cache.put("key1", newEntry);
+        assertThat(cache.get("key1")).isSameAs(newEntry);
     }
 
     @Test
     public void getOrComputeReturnsCachedValueOnHit() throws Exception {
         CertificateCache cache = new CertificateCache(4);
-        X509Certificate cert = fakeCert();
-        cache.put("key1", cert);
+        ParsedXfcc entry = fakeEntry();
+        cache.put("key1", entry);
         java.util.concurrent.atomic.AtomicInteger supplierInvocations = new java.util.concurrent.atomic.AtomicInteger();
 
-        X509Certificate result = cache.getOrCompute("key1", () -> {
+        ParsedXfcc result = cache.getOrCompute("key1", () -> {
             supplierInvocations.incrementAndGet();
-            return fakeCert();
+            return fakeEntry();
         });
 
-        assertThat(result).isSameAs(cert);
+        assertThat(result).isSameAs(entry);
         assertThat(supplierInvocations).hasValue(0);
     }
 
@@ -186,12 +191,12 @@ public final class CertificateCacheTest {
         // 100 tps of identical XFCC headers before getOrCompute was introduced.
         CertificateCache cache = new CertificateCache(128);
         java.util.concurrent.atomic.AtomicInteger supplierInvocations = new java.util.concurrent.atomic.AtomicInteger();
-        X509Certificate sharedCert = fakeCert();
+        ParsedXfcc sharedEntry = fakeEntry();
         int threadCount = 100;
         java.util.concurrent.CountDownLatch start = new java.util.concurrent.CountDownLatch(1);
         java.util.concurrent.CountDownLatch done = new java.util.concurrent.CountDownLatch(threadCount);
         java.util.concurrent.ExecutorService pool = java.util.concurrent.Executors.newFixedThreadPool(threadCount);
-        java.util.List<X509Certificate> results = java.util.Collections.synchronizedList(new java.util.ArrayList<>());
+        java.util.List<ParsedXfcc> results = java.util.Collections.synchronizedList(new java.util.ArrayList<>());
 
         try {
             for (int i = 0; i < threadCount; i++) {
@@ -207,7 +212,7 @@ public final class CertificateCacheTest {
                             } catch (InterruptedException ignored) {
                                 Thread.currentThread().interrupt();
                             }
-                            return sharedCert;
+                            return sharedEntry;
                         }));
                     } catch (Exception e) {
                         throw new RuntimeException(e);
@@ -224,8 +229,8 @@ public final class CertificateCacheTest {
 
         assertThat(supplierInvocations).hasValue(1);
         assertThat(results).hasSize(threadCount);
-        for (X509Certificate result : results) {
-            assertThat(result).isSameAs(sharedCert);
+        for (ParsedXfcc result : results) {
+            assertThat(result).isSameAs(sharedEntry);
         }
     }
 
@@ -239,13 +244,13 @@ public final class CertificateCacheTest {
 
         // Next call retries — no poisoned entry left behind.
         java.util.concurrent.atomic.AtomicInteger invocations = new java.util.concurrent.atomic.AtomicInteger();
-        X509Certificate cert = fakeCert();
+        ParsedXfcc entry = fakeEntry();
         try {
-            X509Certificate result = cache.getOrCompute("key1", () -> {
+            ParsedXfcc result = cache.getOrCompute("key1", () -> {
                 invocations.incrementAndGet();
-                return cert;
+                return entry;
             });
-            assertThat(result).isSameAs(cert);
+            assertThat(result).isSameAs(entry);
             assertThat(invocations).hasValue(1);
         } catch (Exception e) {
             throw new AssertionError(e);

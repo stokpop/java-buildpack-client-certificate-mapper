@@ -44,6 +44,7 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 import org.cloudfoundry.router.CertificateCache;
 import org.cloudfoundry.router.CfSubjectDn;
+import org.cloudfoundry.router.ParsedXfcc;
 import org.cloudfoundry.router.XfccAttributes;
 import org.cloudfoundry.router.XfccEntry;
 import org.cloudfoundry.router.XfccField;
@@ -185,7 +186,13 @@ final class ClientCertificateMapper implements Filter {
         }
     }
 
-    private X509Certificate parseCertificate(String rawValue, XfccEntry xfcc) throws CertificateException, IOException {
+    /** Parses the raw XFCC header value into a {@link ParsedXfcc} bundle: the {@link XfccEntry},
+     *  the decoded {@link X509Certificate} (if a {@code Cert=} field is present or the value is a
+     *  raw certificate), and the {@link CfSubjectDn} derived from any {@code Subject=} field.
+     *  On the cache miss path this is invoked exactly once per key by
+     *  {@link CertificateCache#getOrCompute}. */
+    private ParsedXfcc parseRawValue(String rawValue) throws CertificateException, IOException {
+        XfccEntry xfcc = new XfccEntry(rawValue);
         if (xfcc.resemblesXfcc()) {
             if (this.logger.isLoggable(Level.FINE)) {
                 this.logger.fine("XFCC entry received with fields: " + xfcc.fieldNames());
@@ -193,32 +200,32 @@ final class ClientCertificateMapper implements Filter {
             if (xfcc.hasField(XfccField.HASH) && !XfccHeaderParser.isValidSha256Hex(xfcc.get(XfccField.HASH))) {
                 this.logger.warning("X-Forwarded-Client-Cert Hash= value does not look like a SHA-256 hex digest");
             }
-            if (!xfcc.hasField(XfccField.CERT)) {
-                if (xfcc.hasField(XfccField.CHAIN)) {
-                    this.logger.warning("X-Forwarded-Client-Cert contains Chain= but no Cert= field; Chain= is not supported and the certificate will not be mapped.");
-                }
-                return null;
+            X509Certificate cert = null;
+            if (xfcc.hasField(XfccField.CERT)) {
+                cert = generateCertificate(xfcc.get(XfccField.CERT));
+            } else if (xfcc.hasField(XfccField.CHAIN)) {
+                this.logger.warning("X-Forwarded-Client-Cert contains Chain= but no Cert= field; Chain= is not supported and the certificate will not be mapped.");
             }
-            String certValue = xfcc.get(XfccField.CERT);
-            // Cache key is derived from the Cert= bytes we hold, not from the router-supplied Hash= field:
-            // Hash= can be injected by external clients when header stripping is not enabled. A short hex
-            // digest also keeps hashCode()/equals() on the cache key cheap on every lookup.
-            if (this.certificateCache != null) {
-                String cacheKey = sha256Hex(certValue);
-                if (cacheKey != null) {
-                    return this.certificateCache.getOrCompute(cacheKey, () -> generateCertificate(certValue));
-                }
-            }
-            return generateCertificate(certValue);
+            CfSubjectDn dn = xfcc.hasField(XfccField.SUBJECT)
+                    ? XfccHeaderParser.parseCfSubjectDn(xfcc.get(XfccField.SUBJECT))
+                    : null;
+            return new ParsedXfcc(xfcc, cert, dn);
         }
-        // Non-XFCC raw cert: derive the key from the full header value for the same reasons as above.
+        // Non-XFCC raw cert: no XFCC fields to extract, no CF DN.
+        return new ParsedXfcc(xfcc, generateCertificate(rawValue), null);
+    }
+
+    /** Returns the parsed bundle for {@code rawValue}, using the cache when enabled. When the
+     *  SHA-256 algorithm is unavailable (extremely unusual — logged once by {@link #sha256Hex})
+     *  the request falls back to inline parsing rather than caching under an unsafe long key. */
+    private ParsedXfcc resolve(String rawValue) throws CertificateException, IOException {
         if (this.certificateCache != null) {
             String cacheKey = sha256Hex(rawValue);
             if (cacheKey != null) {
-                return this.certificateCache.getOrCompute(cacheKey, () -> generateCertificate(rawValue));
+                return this.certificateCache.getOrCompute(cacheKey, () -> parseRawValue(rawValue));
             }
         }
-        return generateCertificate(rawValue);
+        return parseRawValue(rawValue);
     }
 
     /** Returns the SHA-256 digest of {@code input} as 64 lowercase hex characters, or {@code null} if
@@ -252,18 +259,18 @@ final class ClientCertificateMapper implements Filter {
         List<X509Certificate> certificates = new ArrayList<>();
 
         for (String rawValue : getRawCertificates(request)) {
-            XfccEntry xfcc = new XfccEntry(rawValue);
-            setXfccAttributes(request, xfcc);
-            X509Certificate cert = parseCertificate(rawValue, xfcc);
-            if (cert != null) {
-                certificates.add(cert);
+            ParsedXfcc parsed = resolve(rawValue);
+            setXfccAttributes(request, parsed);
+            if (parsed.certificate() != null) {
+                certificates.add(parsed.certificate());
             }
         }
 
         return certificates;
     }
 
-    private void setXfccAttributes(HttpServletRequest request, XfccEntry xfcc) {
+    private void setXfccAttributes(HttpServletRequest request, ParsedXfcc parsed) {
+        XfccEntry xfcc = parsed.xfcc();
         if (!xfcc.resemblesXfcc()) {
             return;
         }
@@ -271,14 +278,12 @@ final class ClientCertificateMapper implements Filter {
             request.setAttribute(XfccAttributes.HASH, xfcc.get(XfccField.HASH));
         }
         if (request.getAttribute(XfccAttributes.SUBJECT) == null && xfcc.hasField(XfccField.SUBJECT)) {
-            String subject = xfcc.get(XfccField.SUBJECT);
-            request.setAttribute(XfccAttributes.SUBJECT, subject);
-            setCfSubjectAttributes(request, subject);
+            request.setAttribute(XfccAttributes.SUBJECT, xfcc.get(XfccField.SUBJECT));
+            setCfSubjectAttributes(request, parsed.cfSubjectDn());
         }
     }
 
-    private void setCfSubjectAttributes(HttpServletRequest request, String subject) {
-        CfSubjectDn dn = XfccHeaderParser.parseCfSubjectDn(subject);
+    private void setCfSubjectAttributes(HttpServletRequest request, CfSubjectDn dn) {
         if (dn == null) {
             return;
         }
