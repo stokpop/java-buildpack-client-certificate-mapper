@@ -40,8 +40,8 @@ All options are JVM system properties.
 
 | Property | Default | What it does |
 | --- | --- | --- |
-| `org.cloudfoundry.router.certificate.cache.enabled` | `false` | Cache parsed certificates and reuse them across requests, avoiding a repeated DER/PEM parse. Opt-in; see below for when it pays. |
-| `org.cloudfoundry.router.certificate.cache.size` | `128` | Entries per cache generation; at most `2 x size` cached certificates (~1.5 MB for CF-sized headers at the default). |
+| `org.cloudfoundry.router.certificate.cache.enabled` | `true` | Cache parsed certificates and reuse them across requests, avoiding a repeated DER/PEM parse. |
+| `org.cloudfoundry.router.certificate.cache.size` | `128` | Entries per cache generation; at most `2 x size` cached certificates (~1 MB for CF-sized headers at the default). |
 | `org.cloudfoundry.router.certificate.header.hide` | `false` | Hide the XFCC header from downstream filters and servlets after parsing. |
 
 See [Configuration](#configuration) below for when to change these, and [docs/PERFORMANCE.md](docs/PERFORMANCE.md) for measurements.
@@ -100,13 +100,11 @@ Header parsing details -- format detection, fallback behaviour, Gorouter `xfcc_f
 
 ### Certificate caching
 
-Off by default. Set `org.cloudfoundry.router.certificate.cache.enabled=true` to enable it.
+On by default. Parsed results are reused across requests carrying the same `X-Forwarded-Client-Cert` value, which skips the base64/PEM decode, the ASN.1 parse and the Subject DN parse, and reuses the `X509Certificate` object. Measured savings per call, worst-case hardware, working set inside the cache: 54.0 us to 2.1 us for an Envoy `Cert=` header, 3.6 us to 1.6 us for a Gorouter raw base64 certificate, 1.5 us to 0.3 us for a CF app-identity header. Full matrix in [docs/PERFORMANCE.md](docs/PERFORMANCE.md).
 
-**Enable it when your app receives full client certificates on every request** -- a CF Gorouter domain with `xfcc_format: raw`, or an Envoy `Cert=` header -- *and* the set of distinct calling certificates is smaller than `2 x cache.size`. That is the case the cache is built for: a hit skips the base64/PEM decode and the ASN.1 parse, and reuses the `X509Certificate` object.
+Entries are keyed by the header value itself, so only a byte-for-byte identical header hits and `equals()` confirms every hit -- no derived key can map two different headers onto one certificate.
 
-**Leave it off** for CF app-identity headers (`Hash=` + `Subject=` only, no certificate bytes), where a hit saves a field scan but costs a SHA-256 digest of the header, and for any deployment where more distinct certificates are in rotation than the cache holds -- there it is slower than no cache at all. Measurements for both cases are in [docs/PERFORMANCE.md](docs/PERFORMANCE.md).
-
-Entries are keyed by a SHA-256 digest of the header value as received, so only a byte-for-byte identical header hits. `org.cloudfoundry.router.certificate.cache.size` sets the entries per generation (two generations); invalid or non-positive values are ignored and the default is used, with a warning logged. The filter logs its effective cache configuration at `INFO` on startup, and warns when the hit rate is low.
+**Turn it off** (`org.cloudfoundry.router.certificate.cache.enabled=false`) when more distinct client certificates are in rotation than the cache holds, since a cache that mostly misses is pure overhead, or when the memory does not suit your deployment. `org.cloudfoundry.router.certificate.cache.size` sets the entries per generation (two generations, so `2 x size` entries); invalid or non-positive values are ignored and the default is used, with a warning logged. Each entry retains the header string plus the parsed certificate, so the rough bound is `2 x size x (header bytes + parsed certificate)` -- about 1 MB at the default for CF-sized headers, proportionally more where `maxHttpHeaderSize` has been raised for large certificates. The filter logs its effective cache configuration at `INFO` on startup and warns when the hit rate is low.
 
 Cached certificates are **not** expiry-checked on retrieval; see [docs/TRUST-BOUNDARY.md](docs/TRUST-BOUNDARY.md).
 

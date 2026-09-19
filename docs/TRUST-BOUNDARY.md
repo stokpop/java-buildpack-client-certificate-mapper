@@ -13,9 +13,9 @@ The mapped attributes are therefore trustworthy **only** if requests reach your 
 
 Cached entries are not expiry-checked on retrieval. The filter does not validate certificate validity on cache hits (nor on misses) -- consistent with behaviour before caching was introduced. Applications that require expiry enforcement should check `X509Certificate.checkValidity()` on the mapped request attribute.
 
-## Hash collisions
+## Cache identity
 
-Cache correctness depends on the SHA-256 cache key uniquely identifying the header value it was derived from. A collision (two different header values digesting to the same key) would make the cache return the wrong parsed `X509Certificate` for a request -- an integrity issue, not just a performance one. This is considered cryptographically infeasible: SHA-256 offers ~2^128 collision resistance, far beyond what any attacker can feasibly search for, and the input space per generation (<= 128 live entries at a time, refreshed as certs rotate) gives no practical advantage to a birthday-style attack either. No known SHA-256 collision exists as of this writing.
+The cache is keyed by the `X-Forwarded-Client-Cert` entry exactly as received, and `String.equals()` confirms every hit, so two different header values cannot resolve to one cached certificate. Earlier revisions keyed on a SHA-256 digest of the header, which made key collisions a (cryptographically infeasible) correctness question; keying on the value removes the question rather than arguing it away.
 
 ## Header hiding is fail-open for downstream checks
 

@@ -31,6 +31,8 @@ import org.openjdk.jmh.annotations.Setup;
 import org.openjdk.jmh.annotations.State;
 import org.openjdk.jmh.annotations.Warmup;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -91,7 +93,7 @@ public class XfccResolverBenchmark {
 
     private XfccResolver uncached;
 
-    private CertificateCache rawKeyCache;
+    private CertificateCache digestKeyCache;
 
     @Setup
     public void setUp() throws Exception {
@@ -102,12 +104,12 @@ public class XfccResolverBenchmark {
         }
         this.cached = new XfccResolver(new CertificateCache(128));
         this.uncached = new XfccResolver(null);
-        this.rawKeyCache = new CertificateCache(128);
+        this.digestKeyCache = new CertificateCache(128);
 
         // Prime both caches so steady-state measurement is not dominated by first-touch misses.
         for (char[] header : this.headers) {
             this.cached.resolve(new String(header));
-            resolveWithRawKey(new String(header));
+            resolveWithDigestKey(new String(header));
         }
     }
 
@@ -122,14 +124,16 @@ public class XfccResolverBenchmark {
     }
 
     /**
-     * The same cache, keyed by the header value itself rather than by a SHA-256 digest of it. Uses
-     * the production cache and the production parse path, so the only difference from
-     * {@link #cacheEnabled} is how the key is derived: {@code String.hashCode()} plus an
-     * {@code equals()} on a hit, against a digest of the whole header on every request.
+     * The superseded design: the same cache and the same parse path, keyed by a SHA-256 digest of
+     * the header rather than by the header value that {@link #cacheEnabled} (the production path)
+     * now uses. The only difference measured is key derivation -- a digest of the whole header on
+     * every request, against {@code String.hashCode()} plus an {@code equals()} on a hit. Kept so
+     * the change can be re-measured on other hardware, in particular on CPUs with SHA extensions,
+     * where the digest is roughly six times cheaper than it is here.
      */
     @Benchmark
-    public ParsedXfcc cacheEnabledRawKey(Cursor cursor) throws Exception {
-        return resolveWithRawKey(nextHeader(cursor));
+    public ParsedXfcc cacheEnabledDigestKey(Cursor cursor) throws Exception {
+        return resolveWithDigestKey(nextHeader(cursor));
     }
 
     /** A fresh {@code String} for this operation, as request parsing would produce. */
@@ -137,8 +141,17 @@ public class XfccResolverBenchmark {
         return new String(this.headers[cursor.next(this.headers.length)]);
     }
 
-    private ParsedXfcc resolveWithRawKey(String header) throws Exception {
-        return this.rawKeyCache.getOrCompute(header, () -> this.uncached.resolve(header));
+    private ParsedXfcc resolveWithDigestKey(String header) throws Exception {
+        return this.digestKeyCache.getOrCompute(sha256Hex(header), () -> this.uncached.resolve(header));
+    }
+
+    private static String sha256Hex(String input) throws Exception {
+        byte[] digest = MessageDigest.getInstance("SHA-256").digest(input.getBytes(StandardCharsets.UTF_8));
+        StringBuilder out = new StringBuilder(digest.length * 2);
+        for (byte b : digest) {
+            out.append(Character.forDigit((b >> 4) & 0xf, 16)).append(Character.forDigit(b & 0xf, 16));
+        }
+        return out.toString();
     }
 
     /**

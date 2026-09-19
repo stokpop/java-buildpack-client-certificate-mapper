@@ -2,15 +2,15 @@
 
 Background for the caching and header-hiding settings documented in the [README](../README.md#configuration). Nothing here is needed to use the filter.
 
-**Short version:** as currently keyed, the certificate cache is off by default and worth enabling only for apps that receive a full client certificate on every request -- CF Gorouter `xfcc_format: raw`, or an Envoy `Cert=` header -- with fewer distinct calling certificates than `2 x cache.size`. It is a clear win for URL-encoded PEM, an allocation-only win for bare base64 DER on CPUs without SHA-256 acceleration, marginal for identity-only headers, and a loss for every form once the working set exceeds the cache.
+**Short version:** the certificate cache is on by default and keyed by the header value itself. Measured against no cache, on hardware without SHA-256 acceleration and with the working set inside the cache, it is 26x faster for an Envoy `Cert=` header, 2.3x for a Gorouter raw base64 certificate and 4.5x for a CF app-identity header, and allocates less in every case. Turn it off when more distinct certificates are in rotation than the cache holds.
 
-CPU profiling on CF test systems showed hotspots in both `X509Certificate` construction and XFCC header processing, which is what the cache targets -- but only the first of those disappears on a cache hit, and only when the header carries certificate bytes at all. That, plus the measurements below, is why the default is opt-in rather than on.
+CPU profiling on CF test systems showed hotspots in both `X509Certificate` construction and XFCC header processing. A cache hit removes both, which is why the parsed bundle is cached rather than just the certificate.
 
-The benchmark also measures an alternative: the same cache keyed by the header value rather than by a digest of it. That design is faster for every header form, including the identity-only case, and degrades gently instead of sharply when the working set exceeds the cache. It is not what the filter ships today.
+An earlier revision keyed the cache on a SHA-256 digest of the header. That cost more than it saved -- digesting 1.4-1.8 KB is slower than parsing the certificate on hardware without SHA extensions -- and the numbers below are the reason the key changed. The digest variant is still in the benchmark for comparison.
 
 ## How the cache works
 
-When enabled, parsed results are cached and reused across requests for the same header entry. The key is a 64-character SHA-256 hex digest of the header entry exactly as received -- not the raw string, and not the router-supplied `Hash=` field, which external clients could inject when header stripping is disabled. Only a request carrying the byte-for-byte same header value can hit. The digest is taken over the header string as received (URL-encoded PEM or base64 DER), not over the decoded DER bytes, so it intentionally differs from the Envoy XFCC `Hash=` field and the two are not cross-comparable.
+When enabled, parsed results are cached and reused across requests for the same header entry. The key is the header entry exactly as received -- not the router-supplied `Hash=` field, which external clients could inject when header stripping is disabled, and not a digest. Only a request carrying the byte-for-byte same header value can hit, and `String.equals()` confirms it.
 
 **Every entry is cached, including identity-only ones.** The digest is computed and checked before it is known whether the entry carries a certificate, so the parsed result is stored on a miss regardless -- including CF app-identity headers that carry only `Hash=`/`Subject=`, and `Chain=`-only entries that map no certificate. Entries whose parse fails are not cached: the exception propagates out of `getOrCompute` and nothing is stored.
 
@@ -26,7 +26,7 @@ $ java -jar java-buildpack-client-certificate-mapper-benchmark/target/benchmarks
 $ java -jar java-buildpack-client-certificate-mapper-benchmark/target/benchmarks.jar -prof gc -t 4
 ```
 
-`XfccResolverBenchmark` calls `XfccResolver.resolve()` once per operation, with the cache enabled (size 128, so ~256 entries across both generations) and disabled, which is the default, over three header forms and three working-set sizes. A third variant, `cacheEnabledRawKey`, uses the same cache and the same parse path but keys on the header value instead of its digest, so the only difference measured is key derivation.
+`XfccResolverBenchmark` calls `XfccResolver.resolve()` once per operation, with the cache enabled (size 128, so ~256 entries across both generations) and disabled, which is the default, over three header forms and three working-set sizes. `cacheEnabled` is the production path, which keys on the header value. A third variant, `cacheEnabledDigestKey`, uses the same cache and the same parse path but keys on a SHA-256 digest of the header -- the superseded design, kept so the decision can be re-measured on other hardware, particularly CPUs with SHA extensions.
 
 **Every variant builds a fresh `String` per operation**, because that is what a request produces: the header value is substring-parsed per request, so its `hashCode` has never been computed and it is never the same object the cache stored. Reusing one instance across iterations lets `hashCode` be cached and `equals()` short-circuit on reference identity, which reports the raw-key design at ~14 ns/op -- roughly two orders of magnitude too fast. Any benchmark of a keying strategy that does not build a fresh key per operation is measuring nothing useful. `-prof gc` reports `gc.alloc.rate.norm`, the bytes allocated per operation. Certificates are RSA 2048 leaves with a CF-style Subject DN, generated at setup from a fixed seed.
 
@@ -47,7 +47,7 @@ current cache keyed by a SHA-256 digest of the header, and the same cache keyed 
 itself. `workingSet` is the number of distinct certificates in rotation; the cache holds ~256, so
 512 is the thrash case.
 
-**One thread, working set 16 (everything hits):**
+**One thread, working set 16 (everything hits):** value-key figures re-verified against the shipped implementation (2.1 / 1.6 / 0.33 us), matching the standalone variant they were measured with.
 
 | Form | No cache | Digest key | Raw-value key |
 | --- | --- | --- | --- |
@@ -99,13 +99,13 @@ itself. `workingSet` is the number of distinct certificates in rotation; the cac
 
 On this hardware the raw value is the faster key by ~6.6x, because `String.hashCode()` costs about one cycle per byte where SHA-256 costs about ten. With SHA extensions the two come out close to even. **An earlier version of this document claimed the digest key was ~14.6x faster than a raw-value key; that claim does not reproduce and has been removed.** The likely explanation is that the earlier measurement computed the digest outside the timed region, charging the digest strategy nothing for work the request path performs on every call.
 
-The digest key remains defensible on memory grounds: a 64-character key, against a raw key that retains the whole header string, adding roughly 1.4-1.8 KB per entry for CF-shaped headers and proportionally more where `maxHttpHeaderSize` has been raised. It is not defensible as a speed optimisation. A raw key also removes the collision question entirely -- `equals()` confirms every hit -- at the cost of being the attacker-supplied string itself, which `ConcurrentHashMap` handles by treeifying degenerate buckets.
+The digest key's one remaining advantage is memory: a 64-character key, against a value key that retains the whole header string -- roughly 1.4-1.8 KB per entry for CF-shaped headers, proportionally more where `maxHttpHeaderSize` has been raised. The filter now pays that memory for the speed, and sizing is controlled with `cache.size`. A value key also removes the collision question entirely -- `equals()` confirms every hit -- at the cost of being the caller-supplied string itself, which `ConcurrentHashMap` handles by treeifying degenerate buckets.
 
 ## Memory
 
-Two generations of up to `cache.size` entries each (128 by default). Keys are 64-character digests, negligible next to the values. Each value is a `ParsedXfcc` holding the parsed `X509Certificate` plus the `XfccEntry` it came from, which retains the *recognised field values* -- `Cert=`, `Subject=` and `Chain=` substrings. Unknown fields are skipped and not retained.
+Two generations of up to `cache.size` entries each (128 by default). A key is the header string itself, 1.4-1.8 KB for CF-shaped headers. Each value is a `ParsedXfcc` holding the parsed `X509Certificate` plus the `XfccEntry` it came from, which retains the *recognised field values* -- `Cert=`, `Subject=` and `Chain=` substrings. Unknown fields are skipped and not retained.
 
-For CF-shaped headers (1-2 KB) a full cache is roughly **1.5 MB**. The true bound is `2 x cache.size` multiplied by the largest header the container accepts: at Tomcat's default 8 KB `maxHttpHeaderSize` that is ~2 MB, and a deployment that raises the limit to 48 KB to accommodate large chains bounds it at ~12 MB. Where the fronting proxy does not sanitize the header, the distinctness of those entries is caller-controlled, so the upper bound rather than the typical figure is the one to plan for.
+For CF-shaped headers (1-2 KB) a full cache is roughly **1 MB** of values plus a comparable amount of keys. The true bound is `2 x cache.size` multiplied by the largest header the container accepts: at Tomcat's default 8 KB `maxHttpHeaderSize` that is ~2 MB, and a deployment that raises the limit to 48 KB to accommodate large chains bounds it at ~12 MB. Where the fronting proxy does not sanitize the header, the distinctness of those entries is caller-controlled, so the upper bound rather than the typical figure is the one to plan for.
 
 ## Header hiding
 
