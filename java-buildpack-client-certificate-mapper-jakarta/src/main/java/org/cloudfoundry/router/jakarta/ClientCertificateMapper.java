@@ -69,7 +69,7 @@ final class ClientCertificateMapper implements Filter {
     private final boolean stripXfccHeader;
 
     ClientCertificateMapper() throws CertificateException {
-        boolean cacheEnabled = "true".equalsIgnoreCase(System.getProperty(CACHE_ENABLED_PROPERTY, "true"));
+        boolean cacheEnabled = "true".equalsIgnoreCase(System.getProperty(CACHE_ENABLED_PROPERTY, "false"));
         int cacheSize = DEFAULT_CACHE_SIZE;
         CertificateCache cache = null;
         if (cacheEnabled) {

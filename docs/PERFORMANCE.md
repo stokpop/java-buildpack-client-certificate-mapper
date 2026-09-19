@@ -2,11 +2,13 @@
 
 Background for the caching and header-hiding settings documented in the [README](../README.md#configuration). Nothing here is needed to use the filter.
 
-**Short version:** the certificate cache is a clear win for headers that carry a full certificate as URL-encoded PEM, a wash or a loss for bare base64 DER and for identity-only headers, and a loss for every form once the number of distinct certificates in rotation exceeds `2 x cache.size`. Whether it wins on CPU time at all depends on whether the machine has SHA-256 hardware acceleration. It reduces allocation in every case where it hits.
+**Short version:** the certificate cache is off by default, and worth enabling only for apps that receive a full client certificate on every request -- CF Gorouter `xfcc_format: raw`, or an Envoy `Cert=` header -- with fewer distinct calling certificates than `2 x cache.size`. It is a clear win for URL-encoded PEM, an allocation-only win for bare base64 DER on CPUs without SHA-256 acceleration, marginal for identity-only headers, and a loss for every form once the working set exceeds the cache.
+
+CPU profiling on CF test systems showed hotspots in both `X509Certificate` construction and XFCC header processing, which is what the cache targets -- but only the first of those disappears on a cache hit, and only when the header carries certificate bytes at all. That, plus the measurements below, is why the default is opt-in rather than on.
 
 ## How the cache works
 
-Parsed results are cached and reused across requests for the same header entry. The key is a 64-character SHA-256 hex digest of the header entry exactly as received -- not the raw string, and not the router-supplied `Hash=` field, which external clients could inject when header stripping is disabled. Only a request carrying the byte-for-byte same header value can hit. The digest is taken over the header string as received (URL-encoded PEM or base64 DER), not over the decoded DER bytes, so it intentionally differs from the Envoy XFCC `Hash=` field and the two are not cross-comparable.
+When enabled, parsed results are cached and reused across requests for the same header entry. The key is a 64-character SHA-256 hex digest of the header entry exactly as received -- not the raw string, and not the router-supplied `Hash=` field, which external clients could inject when header stripping is disabled. Only a request carrying the byte-for-byte same header value can hit. The digest is taken over the header string as received (URL-encoded PEM or base64 DER), not over the decoded DER bytes, so it intentionally differs from the Envoy XFCC `Hash=` field and the two are not cross-comparable.
 
 **Every entry is cached, including identity-only ones.** The digest is computed and checked before it is known whether the entry carries a certificate, so the parsed result is stored on a miss regardless -- including CF app-identity headers that carry only `Hash=`/`Subject=`, and `Chain=`-only entries that map no certificate. Entries whose parse fails are not cached: the exception propagates out of `getOrCompute` and nothing is stored.
 
@@ -22,7 +24,7 @@ $ java -jar java-buildpack-client-certificate-mapper-benchmark/target/benchmarks
 $ java -jar java-buildpack-client-certificate-mapper-benchmark/target/benchmarks.jar -prof gc -t 4
 ```
 
-`XfccResolverBenchmark` calls `XfccResolver.resolve()` once per operation, with the cache enabled (size 128, so ~256 entries across both generations) and disabled, over three header forms and three working-set sizes. `-prof gc` reports `gc.alloc.rate.norm`, the bytes allocated per operation. Certificates are RSA 2048 leaves with a CF-style Subject DN, generated at setup from a fixed seed.
+`XfccResolverBenchmark` calls `XfccResolver.resolve()` once per operation, with the cache enabled (size 128, so ~256 entries across both generations) and disabled, which is the default, over three header forms and three working-set sizes. `-prof gc` reports `gc.alloc.rate.norm`, the bytes allocated per operation. Certificates are RSA 2048 leaves with a CF-style Subject DN, generated at setup from a fixed seed.
 
 The three forms map to real deployments:
 
@@ -67,7 +69,7 @@ Same benchmark at `-t 4` on four physical cores. Per-operation averages rise for
 
 - **URL-encoded PEM (`Cert=`) is where the cache pays.** 53 us to 12.5 us, and 22 KB to 2.7 KB per call: the URL-decode plus PEM plus ASN.1 path is expensive enough to dwarf the digest even on hardware this slow at SHA-256.
 - **Bare base64 DER costs more time with the cache than without, on this hardware.** Decoding and parsing the certificate takes ~3.4 us; digesting the header to look it up takes ~6 us. The cache still cuts allocation by 3.5x (7.8 KB to 2.2 KB). On a CPU with SHA extensions the digest drops to roughly 1 us and this form becomes a modest time win too -- but that is an extrapolation, not a measurement.
-- **Identity-only headers do not justify caching on time.** There is no certificate to parse, so the cache trades a ~1.4 us field scan for a ~2.4 us digest-and-lookup. The allocation saving is ~300 B per call. This is the weakest case for the current default.
+- **Identity-only headers do not justify caching on time.** There is no certificate to parse, so the cache trades a ~1.4 us field scan for a ~2.4 us digest-and-lookup. The allocation saving is ~300 B per call. Apps on an mTLS domain gain little by enabling the cache.
 - **Exceeding the cache costs everyone.** At 512 distinct certificates against ~256 slots, every form is slower with the cache on, by 28% (`CERT_FIELD`) to 3.8x (`RAW_BASE64`), and allocates more. Deployments fronting more concurrent client certificates than `2 x cache.size` should raise `cache.size` or disable the cache.
 - **The cache never makes allocation worse while it hits**, and hitting is the common case in CF, where a small number of calling app instances repeat constantly.
 
