@@ -127,4 +127,14 @@
         </pluginManagement>
     </build>
 
+    <profiles>
+        <profile>
+            <!-- JMH benchmarks; excluded from the default build so CI stays fast. Run with: ./mvnw -Pbenchmarks package -->
+            <id>benchmarks</id>
+            <modules>
+                <module>java-buildpack-client-certificate-mapper-benchmark</module>
+            </modules>
+        </profile>
+    </profiles>
+
 </project>

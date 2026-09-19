@@ -41,7 +41,7 @@ All options are JVM system properties.
 | Property | Default | What it does |
 | --- | --- | --- |
 | `org.cloudfoundry.router.certificate.cache.enabled` | `true` | Cache parsed certificates and reuse them across requests, avoiding a repeated DER/PEM parse. |
-| `org.cloudfoundry.router.certificate.cache.size` | `128` | Entries per cache generation; at most `2 x size` cached certificates (~1.5 MB worst case at the default). |
+| `org.cloudfoundry.router.certificate.cache.size` | `128` | Entries per cache generation; at most `2 x size` cached certificates (~1.5 MB for CF-sized headers at the default). |
 | `org.cloudfoundry.router.certificate.header.hide` | `false` | Hide the XFCC header from downstream filters and servlets after parsing. |
 
 See [Configuration](#configuration) below for when to change these, and [docs/PERFORMANCE.md](docs/PERFORMANCE.md) for measurements.
@@ -100,9 +100,11 @@ Header parsing details -- format detection, fallback behaviour, Gorouter `xfcc_f
 
 ### Certificate caching
 
-On by default. Set `org.cloudfoundry.router.certificate.cache.enabled=false` if you'd rather have every request parse the certificate from scratch -- e.g. while profiling, or if the ~1.5 MB worst-case memory is a concern.
+On by default. Entries are keyed by a SHA-256 digest of the header value as received, so only a byte-for-byte identical header hits.
 
-Entries are keyed by a SHA-256 digest of the header value as received, so only a byte-for-byte identical header hits. `org.cloudfoundry.router.certificate.cache.size` sets the entries per generation (two generations); invalid or non-positive values are ignored and the default is used, with a warning logged.
+How much it buys you depends on the header form and on your hardware, and it is not always a win -- measurements are in [docs/PERFORMANCE.md](docs/PERFORMANCE.md). In short: a large win for Envoy `Cert=` (URL-encoded PEM), allocation-only for bare base64 DER on CPUs without SHA-256 acceleration, marginal for identity-only headers, and a net loss once more than `2 x cache.size` distinct certificates are in rotation.
+
+Set `org.cloudfoundry.router.certificate.cache.enabled=false` to parse every request from scratch -- when your working set of client certificates exceeds the cache, while profiling, or if the memory is a concern. `org.cloudfoundry.router.certificate.cache.size` sets the entries per generation (two generations); invalid or non-positive values are ignored and the default is used, with a warning logged.
 
 Cached certificates are **not** expiry-checked on retrieval; see [docs/TRUST-BOUNDARY.md](docs/TRUST-BOUNDARY.md).
 
