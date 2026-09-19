@@ -10,7 +10,7 @@ Details of how `X-Forwarded-Client-Cert` is detected and parsed. For the request
 
 Field names are matched case-insensitively. Multiple header values and the [RFC 9110 section 5.3][rfc9110] comma-delimited equivalent are both supported. JSON format is not supported.
 
-The `Hash=` field (a SHA-256 fingerprint of the leaf certificate, set by the router) is recognised for format detection and optionally sanity-checked, but it cannot be mapped to an `X509Certificate` without a `Cert=` field.
+The `Hash=` field (a SHA-256 fingerprint of the leaf certificate, set by the router) is recognised for format detection, and when present is checked for the shape of a SHA-256 hex digest -- a value that does not match is logged as a warning, not rejected. `Hash=` alone cannot be mapped to an `X509Certificate`; that needs a `Cert=` field.
 
 ## Detection and fallback
 
@@ -18,7 +18,7 @@ An entry is detected as XFCC format when it structurally begins with a short (<=
 
 If an entry passes the structural check but contains none of those recognised fields (e.g. only unknown future fields), it is treated as a raw certificate value; parsing will fail and a warning is logged. This preserves the same external behaviour as the raw-cert fallback path.
 
-Unknown fields are silently skipped and logged at `FINE` level.
+Unknown fields are skipped, with their position (not their name) logged at `FINE` level.
 
 ## CF Gorouter XFCC fields
 

@@ -28,7 +28,7 @@ The short digest recovers ~14.6x of the per-hit cost. Under real concurrent load
 
 ## Memory
 
-The cache uses a generational eviction strategy (two generations of up to 128 entries each, configurable via `org.cloudfoundry.router.certificate.cache.size`). The cache **keys** are cheap: 64-character SHA-256 hex digests, ~16 KB total across 256 entries. The memory comes from the cached **values** -- each is a `ParsedXfcc` bundle holding the parsed `X509Certificate` plus the `XfccEntry` it was derived from, which retains the raw `Cert=` substring (typically 1-2 KB). With both generations full (~256 entries), that is a worst-case total of roughly **~1.5 MB**.
+The cache uses a generational eviction strategy (two generations of up to 128 entries each, configurable via `org.cloudfoundry.router.certificate.cache.size`). The cache **keys** are cheap: 64-character SHA-256 hex digests, on the order of tens of KB across 256 entries. The memory comes from the cached **values** -- each is a `ParsedXfcc` bundle holding the parsed `X509Certificate` plus the `XfccEntry` it was derived from, which retains the raw `Cert=` substring (typically 1-2 KB). With both generations full (~256 entries), that is a worst-case total of roughly **~1.5 MB**.
 
 ## Header hiding
 

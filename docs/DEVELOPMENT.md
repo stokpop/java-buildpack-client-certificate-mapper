@@ -1,6 +1,6 @@
 # Development
 
-The project requires Java 8. To build and test from source:
+The build targets Java 8 bytecode (`maven.compiler` source/target 8); CI builds and tests on Temurin JDK 21. To build and test from source:
 
 ```shell
 $ ./mvnw clean package

@@ -17,13 +17,15 @@ A Servlet filter that maps the [`X-Forwarded-Client-Cert`][xfcc] (XFCC) header s
 
 On Cloud Foundry with the Java buildpack, the jar is added to your application automatically -- nothing to do.
 
-To add it yourself, take a jar from the [Releases page](https://github.com/cloudfoundry/java-buildpack-client-certificate-mapper/releases) (tagged releases such as `v2.1.0`, or **Snapshot** for the latest build from `main`), or depend on it:
+To add it yourself, take a jar from the [Releases page](https://github.com/cloudfoundry/java-buildpack-client-certificate-mapper/releases) -- tagged releases such as `v2.1.0`, or **Snapshot** for the latest build from `main`.
+
+Maven Central carries the older `2.0.1` release; newer versions are published as GitHub Releases only:
 
 ```xml
 <dependency>
     <groupId>org.cloudfoundry</groupId>
     <artifactId>java-buildpack-client-certificate-mapper</artifactId>
-    <version>2.1.0</version>
+    <version>2.0.1</version>
 </dependency>
 ```
 
@@ -122,7 +124,7 @@ Certificate parse failures (invalid Base64, invalid `CertificateFactory` input, 
 
 ## Debug logging
 
-The filter uses Java Util Logging (JUL). Set the logger level for `org.cloudfoundry.router` to `FINE` to log the XFCC field names present in each header (e.g. `Hash`, `Cert`, `Subject`). Certificate values are never logged.
+The filter uses Java Util Logging (JUL). Set the logger level for `org.cloudfoundry.router` to `FINE` to log the recognised XFCC field names present in each header (e.g. `Hash`, `Cert`, `Subject`). Certificate values are never logged.
 
 ## More documentation
 
