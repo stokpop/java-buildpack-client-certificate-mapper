@@ -80,6 +80,15 @@ public class XfccResolverBenchmark {
     public int workingSet;
 
     /**
+     * Entries per cache generation, so the cache holds twice this. Raise it past 375 to exceed the
+     * JDK's own parsed-certificate cache ({@code sun.security.provider.X509Factory.certCache}, 750
+     * soft-referenced entries keyed by the DER bytes), which otherwise serves the no-cache variant
+     * too and hides what parsing a cold certificate really costs.
+     */
+    @Param({"128"})
+    public int cacheSize;
+
+    /**
      * Header values as character arrays, not strings. Each operation builds a fresh {@link String}
      * from one of them, because that is what a request produces: the header value is substring-
      * parsed per request, so its {@code hashCode} has never been computed and it is never the same
@@ -102,9 +111,9 @@ public class XfccResolverBenchmark {
         for (int i = 0; i < corpus.length; i++) {
             this.headers[i] = corpus[i].toCharArray();
         }
-        this.cached = new XfccResolver(new CertificateCache(128));
+        this.cached = new XfccResolver(new CertificateCache(this.cacheSize));
         this.uncached = new XfccResolver(null);
-        this.digestKeyCache = new CertificateCache(128);
+        this.digestKeyCache = new CertificateCache(this.cacheSize);
 
         // Prime both caches so steady-state measurement is not dominated by first-touch misses.
         for (char[] header : this.headers) {

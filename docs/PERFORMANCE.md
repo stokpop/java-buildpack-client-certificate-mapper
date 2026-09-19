@@ -2,7 +2,7 @@
 
 Background for the caching and header-hiding settings documented in the [README](../README.md#configuration). Nothing here is needed to use the filter.
 
-**Short version:** the certificate cache is on by default and keyed by the header value itself. Measured against no cache, on hardware without SHA-256 acceleration and with the working set inside the cache, it is 26x faster for an Envoy `Cert=` header, 2.3x for a Gorouter raw base64 certificate and 4.5x for a CF app-identity header, and allocates less in every case. Turn it off when more distinct certificates are in rotation than the cache holds.
+**Short version:** the certificate cache is on by default and keyed by the header value itself. Measured against no cache, on hardware without SHA-256 acceleration and with the working set inside the cache, it is 26x faster for an Envoy `Cert=` header, 2.3x for a Gorouter raw base64 certificate and 4.5x for a CF app-identity header, and allocates less in every case. Against a working set large enough to defeat the JDK's own certificate cache, the raw base64 figure grows to 6.2x. Size `cache.size` to the number of distinct client certificates you serve; a cache that mostly misses is overhead.
 
 CPU profiling on CF test systems showed hotspots in both `X509Certificate` construction and XFCC header processing. A cache hit removes both, which is why the parsed bundle is cached rather than just the certificate.
 
@@ -88,6 +88,41 @@ itself. `workingSet` is the number of distinct certificates in rotation; the cac
 - **Contention does not change the ranking.** At four threads every design slows down, and the
   ordering is unchanged.
 
+## The JDK already caches parsed certificates
+
+`CertificateFactory.generateCertificate()` consults
+`sun.security.provider.X509Factory.certCache` before parsing: 750 entries, soft references, keyed by
+the decoded DER bytes. Confirmed in a heap dump of a filled cache -- Eclipse MAT reports the
+immediate dominator of all 256 `X509CertImpl` objects as `<ROOT>`, because each is owned both by
+this filter's cache and by that JDK cache:
+
+```
+sun.security.util.MemoryCache  entries=256  maxSize=750  retained=30,944
+```
+
+This has two consequences.
+
+**Measurements with a small working set understate the parse.** Below 750 distinct certificates the
+no-cache variant is served by the JDK cache too, so it never pays a cold ASN.1 parse. Sizing this
+filter's cache to hold the whole working set and pushing past 750 shows what a cold parse costs
+(`RAW_BASE64`, one thread, `cacheSize=1024`):
+
+| Distinct certificates | JDK cert cache | No cache | This filter's cache |
+| --- | --- | --- | --- |
+| 100 | covers the working set | 3.8 us / 9304 B | 1.7 us / 1456 B |
+| 2000 | thrashes at 750 | **12.4 us / 29320 B** | **2.0 us / 1456 B** |
+
+A cold parse is 12.4 us and 29 KB, not the 3.8 us that a warm JDK cache suggests. This filter's
+cache is flat at ~2 us either way, so its advantage grows from 2.2x to 6.2x (and from 6x to 20x on
+allocation) exactly where deployments have many distinct callers.
+
+**What this filter's cache adds over the JDK's.** The JDK cache only helps when the same DER repeats
+within 750 entries, and it is keyed on the *decoded* bytes, so the base64 or URL-decode happens
+before the lookup can. It does nothing for the `XfccEntry` field scan, the Subject DN parse, or the
+`Cert=` substring extraction -- the header processing that CF profiling showed alongside
+`X509Certificate` construction. Being soft-referenced and JVM-wide, it is also shared with
+everything else doing X.509 work and is dropped under memory pressure.
+
 ## Cache key: digest vs. raw value
 
 `CacheKeyBenchmark` isolates the key strategy, looking up a pre-populated map from a freshly built `String` -- which is what a request produces, since the header value is substring-parsed per request and its `hashCode` has never been computed.
@@ -103,9 +138,55 @@ The digest key's one remaining advantage is memory: a 64-character key, against 
 
 ## Memory
 
-Two generations of up to `cache.size` entries each (128 by default). A key is the header string itself, 1.4-1.8 KB for CF-shaped headers. Each value is a `ParsedXfcc` holding the parsed `X509Certificate` plus the `XfccEntry` it came from, which retains the *recognised field values* -- `Cert=`, `Subject=` and `Chain=` substrings. Unknown fields are skipped and not retained.
+Two generations of up to `cache.size` entries each (128 by default). Measured on JDK 21 with a full
+cache of 256 CF-shaped entries, by three methods that answer different questions:
 
-For CF-shaped headers (1-2 KB) a full cache is roughly **1 MB** of values plus a comparable amount of keys. The true bound is `2 x cache.size` multiplied by the largest header the container accepts: at Tomcat's default 8 KB `maxHttpHeaderSize` that is ~2 MB, and a deployment that raises the limit to 48 KB to accommodate large chains bounds it at ~12 MB. Where the fronting proxy does not sanitize the header, the distinctness of those entries is caller-controlled, so the upper bound rather than the typical figure is the one to plan for.
+| Form | Header | Key only (JOL) | Entry (JOL graph) | Exclusively retained (MAT) |
+| --- | --- | --- | --- | --- |
+| Envoy `Cert=` PEM | 1851 B | 1943 B | 10642 B | -- |
+| Gorouter raw base64 | 1416 B | 1496 B | 7802 B | 1545 B |
+| CF app-identity | 262 B | 344 B | 1152 B | -- |
+
+The JOL figure walks everything reachable from the cache. The MAT figure is the retained heap of the
+`CertificateCache` instance in a heap dump, which counts only what would be freed if the cache went
+away -- and it is four times smaller, because the certificates are co-owned by the JDK cert cache
+described above.
+
+So the cost depends on whether the JDK is also holding the certificate:
+
+- **Within the JDK cache's reach (<=750 distinct certificates):** ~1.5 KB per entry, ~0.4 MB for a
+  full 256-entry cache. The certificate is shared; what this cache adds is the key string, the map
+  node and the `ParsedXfcc`/`XfccEntry` shells.
+- **Beyond it, or after soft references are cleared under memory pressure:** this cache is the sole
+  owner and carries the whole ~7.8 KB (raw base64) or ~10.6 KB (Envoy PEM) per entry -- ~2.0 MB and
+  ~2.7 MB respectively for 256 entries.
+
+A parsed `X509Certificate` is **6.1x its DER** (measured: 1061 B DER, 6520 B object graph), which is
+why the entry dwarfs the key. Keying on the header value rather than a 64-character digest therefore
+added roughly 20% to a full cache, not 2x.
+
+The honest framing of the memory cost: this cache converts soft-reclaimable memory, which the
+collector may drop under pressure, into strongly-held memory that it may not.
+
+Sizing follows from that. The rough bound is `2 x cache.size x (header bytes + parsed certificate)`.
+Apps that raised `maxHttpHeaderSize` for large certificates or chains scale both terms, and should
+lower `cache.size` to compensate; apps serving more distinct callers than `2 x cache.size` should
+raise it, since the cold-parse numbers above are what a miss now costs.
+
+### Reproducing the memory figures
+
+```shell
+# object-graph sizes per header form (JDK 21 or older; JOL cannot walk some JDK 25 internals)
+$ ./mvnw -Pbenchmarks -DskipTests package
+$ java -cp java-buildpack-client-certificate-mapper-benchmark/target/benchmarks.jar \
+       org.cloudfoundry.router.benchmark.CacheFootprint
+
+# retained heap, the authoritative figure: dump a running app and query it headlessly
+$ jcmd <pid> GC.heap_dump /tmp/app.hprof
+$ ParseHeapDump.sh /tmp/app.hprof \
+      -command="oql \"SELECT x, x.@retainedHeapSize FROM org.cloudfoundry.router.CertificateCache x\"" \
+      org.eclipse.mat.api:query
+```
 
 ## Header hiding
 

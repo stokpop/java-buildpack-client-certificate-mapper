@@ -68,11 +68,14 @@ import java.util.logging.Logger;
  * headers, and as large as the container's {@code maxHttpHeaderSize} allows where that limit has
  * been raised for certificates with long chains. Each value is a {@link ParsedXfcc} holding the
  * parsed {@link java.security.cert.X509Certificate} and the {@link XfccEntry} it came from, which
- * retains the recognised field values. With the default generation size of 128 the cache holds at
- * most ~256 entries, so a rough worst case is {@code 2 x size x (header bytes + parsed certificate)}
- * -- on the order of 1 MB for CF-shaped headers, proportionally more for larger ones. Size the cache
- * with {@code org.cloudfoundry.router.certificate.cache.size}, or disable it entirely via
- * {@code org.cloudfoundry.router.certificate.cache.enabled}.
+ * retains the recognised field values. Measured on JDK 21 with 256 CF-shaped entries: ~7.8 KB per
+ * entry reachable (raw base64) or ~10.6 KB (Envoy PEM), of which only ~1.5 KB is retained
+ * exclusively by this cache -- the rest is shared with the JVM's own parsed-certificate cache
+ * ({@code sun.security.provider.X509Factory}, 750 soft-referenced entries). Beyond that cache's
+ * reach, or once its soft references are cleared, this cache owns the full amount, so the bound is
+ * {@code 2 x size x (header bytes + parsed certificate)}: ~0.4 MB to ~2 MB at the default size for
+ * CF-shaped headers. Size the cache with {@code org.cloudfoundry.router.certificate.cache.size}, or
+ * disable it entirely via {@code org.cloudfoundry.router.certificate.cache.enabled}.
  *
  * <p><b>Security note.</b> Cached entries are not expiry-checked on retrieval. The filter
  * does not validate certificate validity on cache hits (nor on misses), consistent with

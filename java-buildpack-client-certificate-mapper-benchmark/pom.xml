@@ -59,6 +59,13 @@
             <scope>provided</scope>
         </dependency>
         <dependency>
+            <!-- Exact object-graph sizes for CacheFootprint. Requires JDK 21 or older; on JDK 25 it
+                 cannot walk some JDK-internal records. -->
+            <groupId>org.openjdk.jol</groupId>
+            <artifactId>jol-core</artifactId>
+            <version>0.17</version>
+        </dependency>
+        <dependency>
             <groupId>org.bouncycastle</groupId>
             <artifactId>bcpkix-jdk18on</artifactId>
             <version>${bouncycastle.version}</version>
