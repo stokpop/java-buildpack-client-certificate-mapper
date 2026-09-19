@@ -77,32 +77,68 @@ public class XfccResolverBenchmark {
     @Param({"1", "16", "512"})
     public int workingSet;
 
-    private String[] headers;
+    /**
+     * Header values as character arrays, not strings. Each operation builds a fresh {@link String}
+     * from one of them, because that is what a request produces: the header value is substring-
+     * parsed per request, so its {@code hashCode} has never been computed and it is never the same
+     * object the cache stored. Reusing one {@code String} instance across operations would let
+     * {@code String.hashCode()} be cached and {@code equals()} short-circuit on reference identity,
+     * which flatters any strategy that keys on the value itself by around two orders of magnitude.
+     */
+    private char[][] headers;
 
     private XfccResolver cached;
 
     private XfccResolver uncached;
 
+    private CertificateCache rawKeyCache;
+
     @Setup
     public void setUp() throws Exception {
-        this.headers = XfccCorpus.build(this.form, this.workingSet);
+        String[] corpus = XfccCorpus.build(this.form, this.workingSet);
+        this.headers = new char[corpus.length][];
+        for (int i = 0; i < corpus.length; i++) {
+            this.headers[i] = corpus[i].toCharArray();
+        }
         this.cached = new XfccResolver(new CertificateCache(128));
         this.uncached = new XfccResolver(null);
+        this.rawKeyCache = new CertificateCache(128);
 
-        // Prime the cache so steady-state measurement is not dominated by first-touch misses.
-        for (String header : this.headers) {
-            this.cached.resolve(header);
+        // Prime both caches so steady-state measurement is not dominated by first-touch misses.
+        for (char[] header : this.headers) {
+            this.cached.resolve(new String(header));
+            resolveWithRawKey(new String(header));
         }
     }
 
     @Benchmark
     public ParsedXfcc cacheEnabled(Cursor cursor) throws Exception {
-        return this.cached.resolve(this.headers[cursor.next(this.headers.length)]);
+        return this.cached.resolve(nextHeader(cursor));
     }
 
     @Benchmark
     public ParsedXfcc cacheDisabled(Cursor cursor) throws Exception {
-        return this.uncached.resolve(this.headers[cursor.next(this.headers.length)]);
+        return this.uncached.resolve(nextHeader(cursor));
+    }
+
+    /**
+     * The same cache, keyed by the header value itself rather than by a SHA-256 digest of it. Uses
+     * the production cache and the production parse path, so the only difference from
+     * {@link #cacheEnabled} is how the key is derived: {@code String.hashCode()} plus an
+     * {@code equals()} on a hit, against a digest of the whole header on every request.
+     */
+    @Benchmark
+    public ParsedXfcc cacheEnabledRawKey(Cursor cursor) throws Exception {
+        return resolveWithRawKey(nextHeader(cursor));
+    }
+
+    /** A fresh {@code String} for this operation, as request parsing would produce. */
+    private String nextHeader(Cursor cursor) {
+        return new String(this.headers[cursor.next(this.headers.length)]);
+    }
+
+    private ParsedXfcc resolveWithRawKey(String header) throws Exception {
+        return this.rawKeyCache.getOrCompute(header, () -> this.uncached.resolve(header));
     }
 
     /**

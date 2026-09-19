@@ -2,9 +2,11 @@
 
 Background for the caching and header-hiding settings documented in the [README](../README.md#configuration). Nothing here is needed to use the filter.
 
-**Short version:** the certificate cache is off by default, and worth enabling only for apps that receive a full client certificate on every request -- CF Gorouter `xfcc_format: raw`, or an Envoy `Cert=` header -- with fewer distinct calling certificates than `2 x cache.size`. It is a clear win for URL-encoded PEM, an allocation-only win for bare base64 DER on CPUs without SHA-256 acceleration, marginal for identity-only headers, and a loss for every form once the working set exceeds the cache.
+**Short version:** as currently keyed, the certificate cache is off by default and worth enabling only for apps that receive a full client certificate on every request -- CF Gorouter `xfcc_format: raw`, or an Envoy `Cert=` header -- with fewer distinct calling certificates than `2 x cache.size`. It is a clear win for URL-encoded PEM, an allocation-only win for bare base64 DER on CPUs without SHA-256 acceleration, marginal for identity-only headers, and a loss for every form once the working set exceeds the cache.
 
 CPU profiling on CF test systems showed hotspots in both `X509Certificate` construction and XFCC header processing, which is what the cache targets -- but only the first of those disappears on a cache hit, and only when the header carries certificate bytes at all. That, plus the measurements below, is why the default is opt-in rather than on.
+
+The benchmark also measures an alternative: the same cache keyed by the header value rather than by a digest of it. That design is faster for every header form, including the identity-only case, and degrades gently instead of sharply when the working set exceeds the cache. It is not what the filter ships today.
 
 ## How the cache works
 
@@ -24,7 +26,9 @@ $ java -jar java-buildpack-client-certificate-mapper-benchmark/target/benchmarks
 $ java -jar java-buildpack-client-certificate-mapper-benchmark/target/benchmarks.jar -prof gc -t 4
 ```
 
-`XfccResolverBenchmark` calls `XfccResolver.resolve()` once per operation, with the cache enabled (size 128, so ~256 entries across both generations) and disabled, which is the default, over three header forms and three working-set sizes. `-prof gc` reports `gc.alloc.rate.norm`, the bytes allocated per operation. Certificates are RSA 2048 leaves with a CF-style Subject DN, generated at setup from a fixed seed.
+`XfccResolverBenchmark` calls `XfccResolver.resolve()` once per operation, with the cache enabled (size 128, so ~256 entries across both generations) and disabled, which is the default, over three header forms and three working-set sizes. A third variant, `cacheEnabledRawKey`, uses the same cache and the same parse path but keys on the header value instead of its digest, so the only difference measured is key derivation.
+
+**Every variant builds a fresh `String` per operation**, because that is what a request produces: the header value is substring-parsed per request, so its `hashCode` has never been computed and it is never the same object the cache stored. Reusing one instance across iterations lets `hashCode` be cached and `equals()` short-circuit on reference identity, which reports the raw-key design at ~14 ns/op -- roughly two orders of magnitude too fast. Any benchmark of a keying strategy that does not build a fresh key per operation is measuring nothing useful. `-prof gc` reports `gc.alloc.rate.norm`, the bytes allocated per operation. Certificates are RSA 2048 leaves with a CF-style Subject DN, generated at setup from a fixed seed.
 
 The three forms map to real deployments:
 
@@ -36,42 +40,53 @@ The three forms map to real deployments:
 
 **Results below were measured on a machine with no SHA-256 hardware acceleration** (Intel i7-3615QM, 4 cores / 8 threads, OpenJDK 25.0.2, Linux; `openssl speed sha256` reports ~282 MB/s at 1 KB blocks). This matters more than anything else in this document: the cached path must digest the whole header on every request, which costs ~6 us for a 1.7 KB header here. A CPU with the SHA extensions (any recent x86-64 or ARM server part) digests the same header in roughly 1 us, which shifts every "cache enabled" number below by about 5 us in the cache's favour. Re-run the benchmark on your own hardware before drawing conclusions.
 
-## Results: one thread
+## Results
 
-Average time per `resolve()` call and bytes allocated per call. `workingSet` is the number of distinct certificates in rotation; 512 exceeds the ~256 the cache holds.
+Average time per `resolve()` call and bytes allocated per call, for three designs: no cache, the
+current cache keyed by a SHA-256 digest of the header, and the same cache keyed by the header value
+itself. `workingSet` is the number of distinct certificates in rotation; the cache holds ~256, so
+512 is the thrash case.
 
-| Form | Working set | No cache (us) | Cache (us) | No cache (B/op) | Cache (B/op) |
-| --- | --- | --- | --- | --- | --- |
-| `CERT_FIELD` | 1 | 53.1 | **12.8** | 22128 | **2664** |
-| `CERT_FIELD` | 16 | 53.1 | **12.5** | 22270 | **2658** |
-| `CERT_FIELD` | 512 | **54.6** | 69.8 | **22536** | 25067 |
-| `RAW_BASE64` | 1 | **3.4** | 9.7 | 7848 | **2224** |
-| `RAW_BASE64` | 16 | **3.4** | 9.9 | 7848 | **2224** |
-| `RAW_BASE64` | 512 | **3.7** | 13.9 | **7848** | 10245 |
-| `IDENTITY_ONLY` | 1 | **1.5** | 2.4 | 1376 | **1096** |
-| `IDENTITY_ONLY` | 16 | **1.4** | 2.4 | 1376 | **1072** |
-| `IDENTITY_ONLY` | 512 | **1.7** | 4.6 | **1376** | 2567 |
+**One thread, working set 16 (everything hits):**
 
-## Results: four threads
-
-Same benchmark at `-t 4` on four physical cores. Per-operation averages rise for both variants under contention; the relative picture is unchanged.
-
-| Form | Working set | No cache (us) | Cache (us) |
+| Form | No cache | Digest key | Raw-value key |
 | --- | --- | --- | --- |
-| `CERT_FIELD` | 16 | 103.9 | **29.5** |
-| `CERT_FIELD` | 512 | **111.3** | 127.6 |
-| `RAW_BASE64` | 16 | **9.4** | 22.6 |
-| `RAW_BASE64` | 512 | **9.2** | 29.4 |
-| `IDENTITY_ONLY` | 16 | **3.4** | 5.5 |
-| `IDENTITY_ONLY` | 512 | **4.0** | 9.4 |
+| Envoy `Cert=` PEM | 54.0 us / 24441 B | 12.9 us / 4601 B | **2.1 us / 1895 B** |
+| Gorouter raw base64 | 3.6 us / 9304 B | 9.9 us / 3680 B | **1.6 us / 1456 B** |
+| CF app-identity | 1.5 us / 1680 B | 2.4 us / 1400 B | **0.3 us / 304 B** |
+
+**Four threads, working set 16:**
+
+| Form | No cache | Digest key | Raw-value key |
+| --- | --- | --- | --- |
+| Envoy `Cert=` PEM | 57.6 us | 23.4 us | **3.6 us** |
+| Gorouter raw base64 | 7.2 us | 20.0 us | **2.8 us** |
+| CF app-identity | 2.6 us | 4.9 us | **0.5 us** |
+
+**One thread, working set 512 (mostly misses):**
+
+| Form | No cache | Digest key | Raw-value key |
+| --- | --- | --- | --- |
+| Envoy `Cert=` PEM | **55.0 us** | 70.0 us | 57.9 us |
+| Gorouter raw base64 | **4.0 us** | 14.2 us | 5.6 us |
+| CF app-identity | **1.8 us** | 4.6 us | 2.3 us |
 
 ## What the numbers support
 
-- **URL-encoded PEM (`Cert=`) is where the cache pays.** 53 us to 12.5 us, and 22 KB to 2.7 KB per call: the URL-decode plus PEM plus ASN.1 path is expensive enough to dwarf the digest even on hardware this slow at SHA-256.
-- **Bare base64 DER costs more time with the cache than without, on this hardware.** Decoding and parsing the certificate takes ~3.4 us; digesting the header to look it up takes ~6 us. The cache still cuts allocation by 3.5x (7.8 KB to 2.2 KB). On a CPU with SHA extensions the digest drops to roughly 1 us and this form becomes a modest time win too -- but that is an extrapolation, not a measurement.
-- **Identity-only headers do not justify caching on time.** There is no certificate to parse, so the cache trades a ~1.4 us field scan for a ~2.4 us digest-and-lookup. The allocation saving is ~300 B per call. Apps on an mTLS domain gain little by enabling the cache.
-- **Exceeding the cache costs everyone.** At 512 distinct certificates against ~256 slots, every form is slower with the cache on, by 28% (`CERT_FIELD`) to 3.8x (`RAW_BASE64`), and allocates more. Deployments fronting more concurrent client certificates than `2 x cache.size` should raise `cache.size` or disable the cache.
-- **The cache never makes allocation worse while it hits**, and hitting is the common case in CF, where a small number of calling app instances repeat constantly.
+- **The cache idea is sound; the key derivation is what costs.** Keyed by the header value, every
+  form gets faster and allocates less: 26x for Envoy `Cert=`, 2.3x for raw base64, 4.5x for
+  identity-only. Keyed by a SHA-256 digest, only `Cert=` comes out ahead, because the digest of a
+  1.4-1.8 KB header costs more here than the parse it avoids.
+- **`String.hashCode()` is the cheap hash.** About one cycle per byte, against roughly ten for
+  SHA-256 without hardware acceleration, and it is computed once per request either way -- the
+  digest is pure addition on top.
+- **Missing is cheap with a raw key, expensive with a digest.** At 512 distinct certificates
+  against ~256 slots, the digest key costs 27% (Envoy) to 3.5x (raw base64) over no cache; the
+  raw-value key costs 5% to 37%. A cache that mostly misses stops being a catastrophe.
+- **Identity-only headers only make sense to cache with a cheap key.** 1.5 us to 0.3 us with a raw
+  key; 1.5 us to 2.4 us with a digest.
+- **Contention does not change the ranking.** At four threads every design slows down, and the
+  ordering is unchanged.
 
 ## Cache key: digest vs. raw value
 
@@ -84,7 +99,7 @@ Same benchmark at `-t 4` on four physical cores. Per-operation averages rise for
 
 On this hardware the raw value is the faster key by ~6.6x, because `String.hashCode()` costs about one cycle per byte where SHA-256 costs about ten. With SHA extensions the two come out close to even. **An earlier version of this document claimed the digest key was ~14.6x faster than a raw-value key; that claim does not reproduce and has been removed.** The likely explanation is that the earlier measurement computed the digest outside the timed region, charging the digest strategy nothing for work the request path performs on every call.
 
-The digest key remains defensible on memory grounds -- a 64-character key instead of retaining a second reference to a 1-2 KB header string -- and on not keying on attacker-supplied content length. It is not defensible as a speed optimisation.
+The digest key remains defensible on memory grounds: a 64-character key, against a raw key that retains the whole header string, adding roughly 1.4-1.8 KB per entry for CF-shaped headers and proportionally more where `maxHttpHeaderSize` has been raised. It is not defensible as a speed optimisation. A raw key also removes the collision question entirely -- `equals()` confirms every hit -- at the cost of being the attacker-supplied string itself, which `ConcurrentHashMap` handles by treeifying degenerate buckets.
 
 ## Memory
 
