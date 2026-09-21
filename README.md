@@ -99,9 +99,9 @@ Parsed results are then reused across requests carrying the same header value, s
 
 **Seeing whether it pays.** Hit rate is the number that matters, readable three ways:
 
-- **At shutdown**, a statistics snapshot at `INFO` -- hits, misses, hit rate, rotations, capacity. The reliable one, reported regardless of traffic shape.
+- **At shutdown**, a statistics snapshot at `INFO` -- hits, misses, hit rate, rotations, capacity -- when the servlet container destroys the filter. **Not visible under Spring Boot**: by then Spring Boot has removed its `java.util.logging` bridge on context close, and the JDK's own shutdown hook has reset `java.util.logging`, so the line is dropped.
 - **On generation rotation**, the same snapshot, first at `INFO` and later at `FINE`. Rotation needs a generation's worth of misses, so a working set that fits the cache may never log it.
-- **Per lookup** at `FINE`, one line per hit or miss. Too chatty to leave on, useful for a short sample.
+- **Per lookup** at `FINE`, one line per hit or miss. Too chatty to leave on, useful for a short sample -- and under Spring Boot the way to read the hit rate when the cache does not rotate.
 
 A low hit rate means the working set exceeds `2 x cache.size`: raise it or turn the cache off. It is opt-in deliberately -- the measurements are a benchmark, not production traffic. Note the JVM already caches parsed certificates (`sun.security.provider.X509Factory.certCache`, 750 soft-referenced entries), so applications serving fewer distinct callers than that are partly cached already; this cache earns most beyond that point, and on the XFCC field and Subject DN parsing the JDK's does not cover. [docs/PERFORMANCE.md](docs/PERFORMANCE.md) has the full picture.
 
