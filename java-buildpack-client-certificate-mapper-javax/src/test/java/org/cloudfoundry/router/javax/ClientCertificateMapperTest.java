@@ -1,5 +1,5 @@
 /*
- * Copyright 2017-2023 the original author or authors.
+ * Copyright 2017-2026 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -539,6 +539,37 @@ public final class ClientCertificateMapperTest {
     }
 
     @Test
+    public void destroyIsSafeWithAndWithoutCache() throws Exception {
+        System.clearProperty("org.cloudfoundry.router.certificate.cache.enabled");
+        new ClientCertificateMapper().destroy();
+
+        System.setProperty("org.cloudfoundry.router.certificate.cache.enabled", "true");
+        try {
+            ClientCertificateMapper mapper = new ClientCertificateMapper();
+            assertThat(mapper.certificateCache()).isNotNull();
+            mapper.destroy();
+        } finally {
+            System.clearProperty("org.cloudfoundry.router.certificate.cache.enabled");
+        }
+    }
+
+    @Test
+    public void cacheDisabledByDefault() throws Exception {
+        System.clearProperty("org.cloudfoundry.router.certificate.cache.enabled");
+        assertThat(new ClientCertificateMapper().certificateCache()).isNull();
+    }
+
+    @Test
+    public void cacheEnabledByProperty() throws Exception {
+        System.setProperty("org.cloudfoundry.router.certificate.cache.enabled", "true");
+        try {
+            assertThat(new ClientCertificateMapper().certificateCache()).isNotNull();
+        } finally {
+            System.clearProperty("org.cloudfoundry.router.certificate.cache.enabled");
+        }
+    }
+
+    @Test
     public void cacheUsedForBothIdentityOnlyAndCertXfcc() throws Exception {
         System.setProperty("org.cloudfoundry.router.certificate.cache.enabled", "true");
         try {
@@ -578,4 +609,37 @@ public final class ClientCertificateMapperTest {
             System.clearProperty("org.cloudfoundry.router.certificate.cache.enabled");
         }
     }
+
+    /**
+     * A CF-shaped identity header whose {@code Cert=} blob is corrupt. The certificate cannot be
+     * mapped, but the identity fields the router vouched for are intact and must still reach the
+     * application -- code that authorizes on {@code xfcc.app.guid} would otherwise see nothing at
+     * all, which is indistinguishable from a request that carried no client certificate.
+     */
+    @Test
+    public void malformedCertStillPublishesXfccIdentityAttributes() throws IOException, ServletException {
+        this.request.addHeader(ClientCertificateMapper.HEADER,
+            "Hash=078c0ea84e084ea1c8bf4719ede79c5b078c0ea84e084ea1c8bf4719ede79c5b" +
+                ";Subject=\"CN=12345678-1234-1234-1234-123456789012," +
+                "OU=app:aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb," +
+                "OU=space:cccccccc-4444-5555-6666-dddddddddddd," +
+                "OU=organization:eeeeeeee-7777-8888-9999-ffffffffffff\"" +
+                ";Cert=-----BEGIN%20CERTIFICATE-----%0Anot-a-certificate%0A-----END%20CERTIFICATE-----%0A");
+
+        this.mapper.doFilter(this.request, this.response, this.filterChain);
+
+        assertThat(this.filterChain.getRequest()).isNotNull();
+        assertThat(this.request.getAttribute(ClientCertificateMapper.ATTRIBUTE)).isNull();
+        assertThat(this.request.getAttribute(XfccAttributes.HASH))
+            .isEqualTo("078c0ea84e084ea1c8bf4719ede79c5b078c0ea84e084ea1c8bf4719ede79c5b");
+        assertThat(this.request.getAttribute(XfccAttributes.APP_GUID))
+            .isEqualTo("aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb");
+        assertThat(this.request.getAttribute(XfccAttributes.SPACE_GUID))
+            .isEqualTo("cccccccc-4444-5555-6666-dddddddddddd");
+        assertThat(this.request.getAttribute(XfccAttributes.ORG_GUID))
+            .isEqualTo("eeeeeeee-7777-8888-9999-ffffffffffff");
+        assertThat(this.request.getAttribute(XfccAttributes.INSTANCE_GUID))
+            .isEqualTo("12345678-1234-1234-1234-123456789012");
+    }
+
 }

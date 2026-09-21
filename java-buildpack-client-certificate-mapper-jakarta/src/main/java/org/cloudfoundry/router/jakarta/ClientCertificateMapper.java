@@ -1,5 +1,5 @@
 /*
- * Copyright 2017-2023 the original author or authors.
+ * Copyright 2017-2026 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -59,6 +59,8 @@ final class ClientCertificateMapper implements Filter {
 
     private static final String CACHE_SIZE_PROPERTY = "org.cloudfoundry.router.certificate.cache.size";
 
+    private static final String PROVIDER_PROPERTY = "org.cloudfoundry.router.certificate.provider";
+
     private static final int DEFAULT_CACHE_SIZE = 128;
 
     private final Logger logger = Logger.getLogger(this.getClass().getName());
@@ -69,7 +71,7 @@ final class ClientCertificateMapper implements Filter {
     private final boolean stripXfccHeader;
 
     ClientCertificateMapper() throws CertificateException {
-        boolean cacheEnabled = "true".equalsIgnoreCase(System.getProperty(CACHE_ENABLED_PROPERTY, "true"));
+        boolean cacheEnabled = "true".equalsIgnoreCase(System.getProperty(CACHE_ENABLED_PROPERTY, "false"));
         int cacheSize = DEFAULT_CACHE_SIZE;
         CertificateCache cache = null;
         if (cacheEnabled) {
@@ -87,9 +89,10 @@ final class ClientCertificateMapper implements Filter {
             }
             cache = new CertificateCache(cacheSize);
         }
-        this.resolver = new XfccResolver(cache);
+        String provider = System.getProperty(PROVIDER_PROPERTY);
+        this.resolver = new XfccResolver(cache, provider);
         this.stripXfccHeader = "true".equalsIgnoreCase(System.getProperty(STRIP_HEADER_PROPERTY, "false"));
-        logConfiguration(cacheEnabled, cacheSize);
+        logConfiguration(cacheEnabled, cacheSize, provider);
     }
 
     /** Package-private accessor for tests: the certificate cache, or {@code null} when caching is disabled. */
@@ -99,7 +102,7 @@ final class ClientCertificateMapper implements Filter {
 
     /** Logs the effective filter configuration once at construction, so operators can confirm which
      *  behaviour is active without having to reason about system property defaults. */
-    private void logConfiguration(boolean cacheEnabled, int cacheSize) {
+    private void logConfiguration(boolean cacheEnabled, int cacheSize, String provider) {
         if (!this.logger.isLoggable(Level.INFO)) {
             return;
         }
@@ -115,12 +118,21 @@ final class ClientCertificateMapper implements Filter {
         } else {
             message.append("disabled (").append(STRIP_HEADER_PROPERTY).append("=true to enable)");
         }
+        if (provider != null && !provider.trim().isEmpty()) {
+            message.append("; certificates parsed with JCA provider ").append(provider.trim());
+        }
         this.logger.info(message.toString());
     }
 
     @Override
     public void destroy() {
-
+        // The cache logs a statistics snapshot when it rotates a generation, which only happens
+        // after a generation's worth of misses. An application whose working set fits the cache --
+        // the case the cache is for -- may never rotate, and would otherwise report nothing at all.
+        CertificateCache cache = this.resolver.cache();
+        if (cache != null && this.logger.isLoggable(Level.INFO)) {
+            this.logger.info("Certificate cache at shutdown (" + cache.statistics() + ")");
+        }
     }
 
     @Override
@@ -154,7 +166,13 @@ final class ClientCertificateMapper implements Filter {
         List<X509Certificate> certificates = new ArrayList<>();
 
         for (String rawValue : getRawCertificates(request)) {
-            ParsedXfcc parsed = this.resolver.resolve(rawValue);
+            ParsedXfcc parsed;
+            try {
+                parsed = this.resolver.resolve(rawValue);
+            } catch (CertificateException | IOException | RuntimeException e) {
+                publishIdentityOfUnparseableEntry(request, rawValue);
+                throw e;
+            }
             setXfccAttributes(request, parsed);
             if (parsed.certificate() != null) {
                 certificates.add(parsed.certificate());
@@ -162,6 +180,20 @@ final class ClientCertificateMapper implements Filter {
         }
 
         return certificates;
+    }
+
+    /**
+     * Publishes the XFCC identity attributes of an entry whose certificate could not be parsed, so
+     * a corrupt {@code Cert=} costs the caller only the certificate and not the router-supplied
+     * identity. Best-effort: a failure here must never replace the parse failure being reported.
+     */
+    private void publishIdentityOfUnparseableEntry(HttpServletRequest request, String rawValue) {
+        try {
+            setXfccAttributes(request, this.resolver.identity(rawValue));
+        } catch (RuntimeException e) {
+            this.logger.warning("Unable to read X-Forwarded-Client-Cert identity fields from an entry whose certificate"
+                + " failed to parse; no identity attributes were set for it.");
+        }
     }
 
     private void setXfccAttributes(HttpServletRequest request, ParsedXfcc parsed) {

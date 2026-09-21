@@ -1,5 +1,5 @@
 /*
- * Copyright 2017-2023 the original author or authors.
+ * Copyright 2017-2026 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,7 +21,7 @@ import java.security.cert.X509Certificate;
 /**
  * Immutable bundle of everything derived from a single {@code X-Forwarded-Client-Cert} header value.
  *
- * <p>The {@link CertificateCache} keys this bundle by a SHA-256 digest of the raw header value so a
+ * <p>The {@link CertificateCache} keys this bundle by the raw header value so a
  * repeated header hits one cache entry and skips all of: {@link XfccEntry} one-pass parsing, X.509
  * decoding, and CF subject DN parsing. Under load with a small set of client certificates this is
  * the dominant hot path in the filter, so caching the parsed bundle rather than just the certificate

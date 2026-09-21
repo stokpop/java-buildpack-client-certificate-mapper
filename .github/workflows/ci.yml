@@ -16,6 +16,12 @@ on:
       - 'NOTICE'
   workflow_dispatch:
 
+# A commit pushed to a branch with an open pull request matches both triggers above. Keep the
+# newest run of each ref and cancel the rest, rather than building the same commit twice.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest

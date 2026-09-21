@@ -1,5 +1,5 @@
 /*
- * Copyright 2017-2023 the original author or authors.
+ * Copyright 2017-2026 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -48,32 +48,37 @@ import java.util.logging.Logger;
  * Different keys never block each other. Prefer {@code getOrCompute} over the raw {@link #get} /
  * {@link #put} pair on hot paths.
  *
- * <p><b>Why not key by the raw certificate string.</b> Using the full ~1.3 KB {@code Cert=} (or raw
- * header) value directly as the map key was measured to burn most of the cache's benefit: because
- * each request produces a fresh {@code String} instance from XFCC substring parsing,
- * {@link String#hashCode()} cannot be reused across requests and traverses the whole key on every
- * lookup, and a hit also requires a full-length {@link String#equals(Object)}. JMH measurement on
- * JDK 25 (single-threaded, {@code AverageTime}, 5+5 iterations x 2 forks):
+ * <p><b>Why the header value is the key.</b> Keys are the raw {@code X-Forwarded-Client-Cert}
+ * entry exactly as received. Each request produces a fresh {@code String} from header parsing, so
+ * {@link String#hashCode()} is computed once per lookup, traversing the value at roughly one cycle
+ * per byte, and a hit is confirmed by a full {@link String#equals(Object)}. Deriving a SHA-256
+ * digest to use as a shorter key was measured to cost more than it saves: the digest traverses the
+ * same bytes at roughly ten cycles per byte on hardware without SHA extensions, which exceeds the
+ * certificate parse the cache exists to avoid. JMH, single thread, working set of 16, platform
+ * provider, no SHA hardware acceleration (see {@code docs/PERFORMANCE.md} for the full matrix and
+ * the measurement setup):
  * <pre>
- *   parse the cert every call (no cache):            ~3620 ns/op
- *   cache hit keyed by the raw ~1.3 KB cert string:  ~1890 ns/op  (only 1.9x vs no cache)
- *   cache hit keyed by 64-char SHA-256 hex digest:    ~130 ns/op  (28x vs no cache)
+ *   Envoy Cert= PEM,     no cache / cached:  24.3 / 3.0 us
+ *   Gorouter raw base64, no cache / cached:   5.2 / 2.3 us
+ *   CF app-identity,     no cache / cached:   2.1 / 0.5 us
  * </pre>
- * Deriving a short digest recovers ~14.6x of the per-hit cost and -- under real concurrent load --
- * removes the compounded per-request CPU that made a raw-key cache measurably worse than no cache
- * at all in field measurements.
+ * Keying on a SHA-256 digest instead was measured at 13.1 us against 2.0 us for the raw value on a
+ * 1.3 KB header ({@code CacheKeyBenchmark}), which is why that design was dropped.
+ * Keying on the value also removes the question of key collisions entirely: two different headers
+ * cannot map to one cached certificate, because {@code equals} decides every hit.
  *
- * <p><b>Memory budget.</b> Keys are 64-character SHA-256 hex digests derived from the raw header
- * value the entry was parsed from. Deriving the key ensures only a request carrying the actual
- * header can produce a hit, and keeps {@link String#hashCode()} and {@link String#equals(Object)}
- * on the cache key cheap on every lookup. Note that the digest is taken over the header string as
- * received -- the URL-encoded PEM or base64 DER -- not over the decoded DER bytes, so the key
- * intentionally differs from the Envoy XFCC {@code Hash=} field (which is defined as SHA-256 of the
- * DER). This is fine for cache identity (same header value produces the same key) but means the two
- * hashes are not cross-comparable. With the default generation size of 128, the cache holds at most
- * ~256 {@link ParsedXfcc} bundles plus ~16 KB of key strings.
- * If this is a concern, disable caching via the
- * {@code org.cloudfoundry.router.certificate.cache.enabled} system property.
+ * <p><b>Memory budget.</b> A key is the header string itself -- typically 1.4-1.8 KB for CF-shaped
+ * headers, and as large as the container's {@code maxHttpHeaderSize} allows where that limit has
+ * been raised for certificates with long chains. Each value is a {@link ParsedXfcc} holding the
+ * parsed {@link java.security.cert.X509Certificate} and the {@link XfccEntry} it came from, which
+ * retains the recognised field values. Measured on JDK 21 with 256 CF-shaped entries: ~7.8 KB per
+ * entry reachable (raw base64) or ~10.6 KB (Envoy PEM), of which only ~1.5 KB is retained
+ * exclusively by this cache -- the rest is shared with the JVM's own parsed-certificate cache
+ * ({@code sun.security.provider.X509Factory}, 750 soft-referenced entries). Beyond that cache's
+ * reach, or once its soft references are cleared, this cache owns the full amount, so the bound is
+ * {@code 2 x size x (header bytes + parsed certificate)}: ~0.4 MB to ~2 MB at the default size for
+ * CF-shaped headers. Size the cache with {@code org.cloudfoundry.router.certificate.cache.size}, or
+ * disable it entirely via {@code org.cloudfoundry.router.certificate.cache.enabled}.
  *
  * <p><b>Security note.</b> Cached entries are not expiry-checked on retrieval. The filter
  * does not validate certificate validity on cache hits (nor on misses), consistent with
@@ -91,8 +96,10 @@ import java.util.logging.Logger;
  * {@code FINE}, so traffic with mostly unique certificates cannot flood the log. Rotation is used as
  * the reporting interval because it needs no timer and no clock reads on the request path.
  *
- * <p>Use {@link #get(String)} and {@link #put(String, ParsedXfcc)} as the only entry
- * points so the implementation can be replaced without touching call sites.
+ * <p>Go through {@link #peek(String)} and {@link #getOrCompute(String, ParsedXfccSupplier)} on the
+ * request path, so the implementation can be replaced without touching call sites and misses stay
+ * deduplicated. {@link #get(String)} and {@link #put(String, ParsedXfcc)} remain for callers that
+ * need the two halves separately, and give up that deduplication.
  */
 public final class CertificateCache {
 
