@@ -26,9 +26,15 @@ import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletRequestWrapper;
 import java.io.IOException;
 import java.security.cert.CertificateException;
+import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Enumeration;
+import java.util.List;
+import java.util.logging.Handler;
+import java.util.logging.LogRecord;
+import java.util.logging.Logger;
 
 import org.cloudfoundry.router.XfccAttributes;
 import org.cloudfoundry.router.CertificateCache;
@@ -177,20 +183,23 @@ public final class ClientCertificateMapperTest {
     /** Each entry in a multi-header request is cached independently, keyed by its own digest, so a
      *  repeat request with the same two (distinct) headers must hit both cache slots and reproduce
      *  the same objects in the same order -- caching must not merge, reorder, or cross-contaminate
-     *  entries. Relies on caching being enabled (the default). */
+     *  entries. */
     @Test
-    public void multipleHeadersEachCachedIndependently() throws IOException, ServletException {
+    public void multipleHeadersEachCachedIndependently() throws Exception {
+        ClientCertificateMapper mapper = cachingMapper();
         this.request.addHeader(ClientCertificateMapper.HEADER, CERTIFICATE_1);
         this.request.addHeader(ClientCertificateMapper.HEADER, CERTIFICATE_2);
-        this.mapper.doFilter(this.request, this.response, this.filterChain);
+        mapper.doFilter(this.request, this.response, this.filterChain);
         X509Certificate[] first = (X509Certificate[]) this.request.getAttribute(ClientCertificateMapper.ATTRIBUTE);
 
         MockHttpServletRequest request2 = new MockHttpServletRequest();
         request2.addHeader(ClientCertificateMapper.HEADER, CERTIFICATE_1);
         request2.addHeader(ClientCertificateMapper.HEADER, CERTIFICATE_2);
-        this.mapper.doFilter(request2, this.response, new MockFilterChain());
+        mapper.doFilter(request2, this.response, new MockFilterChain());
         X509Certificate[] second = (X509Certificate[]) request2.getAttribute(ClientCertificateMapper.ATTRIBUTE);
 
+        assertThat(mapper.certificateCache().getMissCount()).isEqualTo(2);
+        assertThat(mapper.certificateCache().getHitCount()).isEqualTo(2);
         assertThat(second).hasSize(2);
         assertThat(second[0]).isSameAs(first[0]);
         assertThat(second[1]).isSameAs(first[1]);
@@ -403,31 +412,35 @@ public final class ClientCertificateMapperTest {
     }
 
     @Test
-    public void xfccCacheHit() throws IOException, ServletException {
+    public void xfccCacheHit() throws Exception {
+        ClientCertificateMapper mapper = cachingMapper();
         String header = "Hash=078c0ea84e084ea1c8bf4719ede79c5b078c0ea84e084ea1c8bf4719ede79c5b;Cert=" + NGINX_ESCAPED_CERT;
         this.request.addHeader(ClientCertificateMapper.HEADER, header);
-        this.mapper.doFilter(this.request, this.response, this.filterChain);
+        mapper.doFilter(this.request, this.response, this.filterChain);
         X509Certificate first = ((X509Certificate[]) this.request.getAttribute(ClientCertificateMapper.ATTRIBUTE))[0];
 
         MockHttpServletRequest request2 = new MockHttpServletRequest();
         request2.addHeader(ClientCertificateMapper.HEADER, header);
-        this.mapper.doFilter(request2, this.response, new MockFilterChain());
+        mapper.doFilter(request2, this.response, new MockFilterChain());
         X509Certificate second = ((X509Certificate[]) request2.getAttribute(ClientCertificateMapper.ATTRIBUTE))[0];
 
+        assertThat(mapper.certificateCache().getHitCount()).isEqualTo(1);
         assertThat(second).isSameAs(first);
     }
 
     @Test
-    public void rawCacheHitSha256() throws IOException, ServletException {
+    public void rawCacheHit() throws Exception {
+        ClientCertificateMapper mapper = cachingMapper();
         this.request.addHeader(ClientCertificateMapper.HEADER, CERTIFICATE_1);
-        this.mapper.doFilter(this.request, this.response, this.filterChain);
+        mapper.doFilter(this.request, this.response, this.filterChain);
         X509Certificate first = ((X509Certificate[]) this.request.getAttribute(ClientCertificateMapper.ATTRIBUTE))[0];
 
         MockHttpServletRequest request2 = new MockHttpServletRequest();
         request2.addHeader(ClientCertificateMapper.HEADER, CERTIFICATE_1);
-        this.mapper.doFilter(request2, this.response, new MockFilterChain());
+        mapper.doFilter(request2, this.response, new MockFilterChain());
         X509Certificate second = ((X509Certificate[]) request2.getAttribute(ClientCertificateMapper.ATTRIBUTE))[0];
 
+        assertThat(mapper.certificateCache().getHitCount()).isEqualTo(1);
         assertThat(second).isSameAs(first);
     }
 
@@ -623,6 +636,48 @@ public final class ClientCertificateMapperTest {
             mapper.doFilter(certRequest2, new MockHttpServletResponse(), new MockFilterChain());
             assertThat(cache.getMissCount()).isEqualTo(2);
             assertThat(cache.getHitCount()).isEqualTo(2);
+        } finally {
+            System.clearProperty("org.cloudfoundry.router.certificate.cache.enabled");
+        }
+    }
+
+    @Test
+    public void configurationLogNamesTheProviderInUseNotTheOneRequested() throws Exception {
+        Logger logger = Logger.getLogger(ClientCertificateMapper.class.getName());
+        List<String> messages = new ArrayList<>();
+        Handler handler = new Handler() {
+            @Override
+            public void publish(LogRecord record) {
+                messages.add(record.getMessage());
+            }
+
+            @Override
+            public void flush() {
+            }
+
+            @Override
+            public void close() {
+            }
+        };
+        logger.addHandler(handler);
+        System.setProperty("org.cloudfoundry.router.certificate.provider", "NoSuchProviderXyz");
+        try {
+            new ClientCertificateMapper();
+        } finally {
+            System.clearProperty("org.cloudfoundry.router.certificate.provider");
+            logger.removeHandler(handler);
+        }
+
+        String platformDefault = CertificateFactory.getInstance("X.509").getProvider().getName();
+        assertThat(messages).anySatisfy(message -> assertThat(message)
+                .contains("certificates parsed with JCA provider " + platformDefault)
+                .doesNotContain("JCA provider NoSuchProviderXyz"));
+    }
+
+    private static ClientCertificateMapper cachingMapper() throws CertificateException {
+        System.setProperty("org.cloudfoundry.router.certificate.cache.enabled", "true");
+        try {
+            return new ClientCertificateMapper();
         } finally {
             System.clearProperty("org.cloudfoundry.router.certificate.cache.enabled");
         }

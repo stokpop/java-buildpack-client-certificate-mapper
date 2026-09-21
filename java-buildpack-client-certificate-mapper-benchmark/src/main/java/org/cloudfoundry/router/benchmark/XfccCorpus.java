@@ -67,7 +67,10 @@ public final class XfccCorpus {
         KeyPair keyPair = generator.generateKeyPair();
         ContentSigner signer = new JcaContentSignerBuilder("SHA256withRSA").build(keyPair.getPrivate());
         MessageDigest sha256 = MessageDigest.getInstance("SHA-256");
-        // Fixed seed: the corpus is identical from run to run, so results are comparable.
+        // Fixed seed: the Subject DNs, and so every header's shape and length, are the same from run to
+        // run. The RSA key and the validity dates are not -- they change the certificate bytes but
+        // not their size or the work of parsing them, so timings compare across runs; the headers
+        // themselves do not.
         Random random = new Random(42L);
 
         String[] headers = new String[count];

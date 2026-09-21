@@ -100,6 +100,12 @@ public final class XfccResolver {
         return CertificateFactory.getInstance("X.509");
     }
 
+    /** The name of the JCA provider certificates are actually parsed with -- after any fallback from
+     *  a requested provider that was not usable, so this can differ from what was asked for. */
+    public String providerName() {
+        return this.certificateFactory.getProvider().getName();
+    }
+
     /** The certificate cache in use, or {@code null} when caching is disabled. */
     public CertificateCache cache() {
         return this.certificateCache;
@@ -208,19 +214,19 @@ public final class XfccResolver {
      * it cannot lose or alter a byte. A value that matches neither format falls through to the
      * previous behaviour, which leaves the resulting bytes for {@code CertificateFactory} to
      * reject.
+     *
+     * <p>A value that carries PEM armor but no valid PEM body is rejected here rather than handed
+     * to {@code CertificateFactory}, whose own PEM reader skips characters that are not base64 and
+     * would quietly recover a certificate from a corrupt body -- on its much slower path.
      */
-    private byte[] decodeHeader(String rawCertificate) {
+    private byte[] decodeHeader(String rawCertificate) throws CertificateException {
         if (startsWithPemArmor(rawCertificate)) {
-            byte[] der = pemToDer(rawCertificate);
-            if (der != null) {
-                return der;
-            }
+            return pemToDer(rawCertificate);
         }
         if (rawCertificate.indexOf('%') >= 0) {
             String decoded = urlDecode(rawCertificate);
-            byte[] der = pemToDer(decoded);
-            if (der != null) {
-                return der;
+            if (decoded.contains(PEM_BEGIN)) {
+                return pemToDer(decoded);
             }
             return decoded.getBytes(StandardCharsets.UTF_8);
         }
@@ -240,26 +246,32 @@ public final class XfccResolver {
     }
 
     /**
-     * Extracts the DER bytes of the first certificate in a PEM document, or {@code null} when the
-     * value carries no complete {@code -----BEGIN/END CERTIFICATE-----} block or its body is not
-     * valid base64. Callers treat {@code null} as "not PEM" and fall back.
+     * Extracts the DER bytes of the first certificate in a PEM document.
+     *
+     * @throws CertificateException when the value carries no complete
+     *         {@code -----BEGIN/END CERTIFICATE-----} block, or its body is not valid base64
      */
-    private static byte[] pemToDer(String pem) {
+    private static byte[] pemToDer(String pem) throws CertificateException {
         int begin = pem.indexOf(PEM_BEGIN);
-        if (begin < 0) {
-            return null;
-        }
         int bodyStart = begin + PEM_BEGIN.length();
-        int end = pem.indexOf(PEM_END, bodyStart);
+        int end = begin < 0 ? -1 : pem.indexOf(PEM_END, bodyStart);
         if (end < 0) {
-            return null;
+            throw new CertificateException("PEM certificate has no complete BEGIN/END CERTIFICATE block");
+        }
+        // Whitespace is dropped explicitly, whatever the router wrapped the body with -- including a
+        // PEM that arrived with no line breaks at all. Anything else that is not base64 is
+        // corruption, which the strict decoder rejects; a MIME decoder would skip it silently.
+        StringBuilder body = new StringBuilder(end - bodyStart);
+        for (int i = bodyStart; i < end; i++) {
+            char c = pem.charAt(i);
+            if (!Character.isWhitespace(c)) {
+                body.append(c);
+            }
         }
         try {
-            // A MIME decoder because it skips the line breaks in the body, whatever the router
-            // wrapped them with -- including a PEM that arrived with no line breaks at all.
-            return Base64.getMimeDecoder().decode(pem.substring(bodyStart, end));
+            return Base64.getDecoder().decode(body.toString());
         } catch (IllegalArgumentException e) {
-            return null;
+            throw new CertificateException("PEM certificate body is not valid base64", e);
         }
     }
 

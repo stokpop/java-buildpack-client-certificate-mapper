@@ -21,6 +21,7 @@ import org.junit.jupiter.api.Test;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.security.cert.CertificateException;
+import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
 import java.util.Base64;
 
@@ -268,6 +269,44 @@ public final class XfccResolverTest {
         ParsedXfcc parsed = resolver.resolve("-----BEGIN CERTIFICATE-----" + base64 + "-----END CERTIFICATE-----");
 
         assertThat(parsed.certificate().getEncoded()).isEqualTo(expected.getEncoded());
+    }
+
+    /**
+     * A PEM body carrying a character that is neither base64 nor whitespace is corrupt. A MIME
+     * decoder skips such characters and would hand back the original DER, so the corruption must
+     * be rejected here -- and not recovered by {@code CertificateFactory}'s own lenient PEM reader.
+     */
+    @Test
+    public void pemWithIllegalCharacterInBodyIsRejected() throws Exception {
+        XfccResolver resolver = new XfccResolver(null);
+        X509Certificate expected = resolver.resolve(NGINX_ESCAPED_CERT).certificate();
+        String base64 = Base64.getEncoder().encodeToString(expected.getEncoded());
+        String corrupt = pem(base64.substring(0, 100) + "*" + base64.substring(100), "\n");
+
+        assertThatThrownBy(() -> resolver.resolve(corrupt))
+                .isInstanceOf(CertificateException.class);
+    }
+
+    @Test
+    public void urlEncodedPemWithIllegalCharacterInBodyIsRejected() throws Exception {
+        XfccResolver resolver = new XfccResolver(null);
+        X509Certificate expected = resolver.resolve(NGINX_ESCAPED_CERT).certificate();
+        String base64 = Base64.getEncoder().encodeToString(expected.getEncoded());
+        String encoded = URLEncoder.encode(pem(base64.substring(0, 100) + "*" + base64.substring(100), "\n"),
+                StandardCharsets.UTF_8.name());
+
+        assertThatThrownBy(() -> resolver.resolve("Hash=" + HASH + ";Cert=" + encoded))
+                .isInstanceOf(CertificateException.class);
+    }
+
+    @Test
+    public void providerNameReportsTheProviderInUse() throws Exception {
+        String platformDefault = CertificateFactory.getInstance("X.509").getProvider().getName();
+
+        assertThat(new XfccResolver(null).providerName()).isEqualTo(platformDefault);
+        assertThat(new XfccResolver(null, "SUN").providerName()).isEqualTo("SUN");
+        assertThat(new XfccResolver(null, "NoSuchProviderXyz").providerName()).isEqualTo(platformDefault);
+        assertThat(new XfccResolver(null, "SunJCE").providerName()).isEqualTo(platformDefault);
     }
 
     private static String pem(String base64, String lineEnding) {

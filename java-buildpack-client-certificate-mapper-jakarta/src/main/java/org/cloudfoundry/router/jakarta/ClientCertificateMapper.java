@@ -92,7 +92,7 @@ final class ClientCertificateMapper implements Filter {
         String provider = System.getProperty(PROVIDER_PROPERTY);
         this.resolver = new XfccResolver(cache, provider);
         this.stripXfccHeader = "true".equalsIgnoreCase(System.getProperty(STRIP_HEADER_PROPERTY, "false"));
-        logConfiguration(cacheEnabled, cacheSize, provider);
+        logConfiguration(cacheEnabled, cacheSize);
     }
 
     /** Package-private accessor for tests: the certificate cache, or {@code null} when caching is disabled. */
@@ -102,7 +102,7 @@ final class ClientCertificateMapper implements Filter {
 
     /** Logs the effective filter configuration once at construction, so operators can confirm which
      *  behaviour is active without having to reason about system property defaults. */
-    private void logConfiguration(boolean cacheEnabled, int cacheSize, String provider) {
+    private void logConfiguration(boolean cacheEnabled, int cacheSize) {
         if (!this.logger.isLoggable(Level.INFO)) {
             return;
         }
@@ -118,9 +118,9 @@ final class ClientCertificateMapper implements Filter {
         } else {
             message.append("disabled (").append(STRIP_HEADER_PROPERTY).append("=true to enable)");
         }
-        if (provider != null && !provider.trim().isEmpty()) {
-            message.append("; certificates parsed with JCA provider ").append(provider.trim());
-        }
+        // The provider actually in use, not the one requested: an unusable name falls back to the
+        // platform default, and the resolver has already warned about that.
+        message.append("; certificates parsed with JCA provider ").append(this.resolver.providerName());
         this.logger.info(message.toString());
     }
 
@@ -144,8 +144,9 @@ final class ClientCertificateMapper implements Filter {
                 if (!certificates.isEmpty()) {
                     request.setAttribute(ATTRIBUTE, certificates.toArray(new X509Certificate[0]));
                 }
-            // IllegalArgumentException: malformed %xx in URL-encoded cert value; treat same as parse failure
-            } catch (CertificateException | IllegalArgumentException e) {
+            // IllegalArgumentException: malformed %xx in URL-encoded cert value; treat same as parse failure.
+            // IOException: declared by the resolver's decode path; degrade the same way rather than fail the request.
+            } catch (CertificateException | IOException | IllegalArgumentException e) {
                 this.logger.warning("Unable to parse certificates in X-Forwarded-Client-Cert");
             }
             // Only wrap when the header is actually present -- avoids allocation on requests without a cert.
