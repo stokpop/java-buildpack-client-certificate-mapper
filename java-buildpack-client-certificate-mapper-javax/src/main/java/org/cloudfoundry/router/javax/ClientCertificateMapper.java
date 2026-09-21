@@ -126,13 +126,7 @@ final class ClientCertificateMapper implements Filter {
 
     @Override
     public void destroy() {
-        // The cache logs a statistics snapshot when it rotates a generation, which only happens
-        // after a generation's worth of misses. An application whose working set fits the cache --
-        // the case the cache is for -- may never rotate, and would otherwise report nothing at all.
-        CertificateCache cache = this.resolver.cache();
-        if (cache != null && this.logger.isLoggable(Level.INFO)) {
-            this.logger.info("Certificate cache at shutdown (" + cache.statistics() + ")");
-        }
+
     }
 
     @Override

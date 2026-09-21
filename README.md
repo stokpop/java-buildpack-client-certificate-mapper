@@ -97,11 +97,10 @@ Parsed results are then reused across requests carrying the same header value, s
 
 `cache.size` is the entries per generation, two generations, so `2 x size` entries -- roughly 0.4-2.6 MB at the default of 128 for CF-sized headers, more for chains. Size it to the number of distinct client certificates you serve, or leave it off: a cache that mostly misses is overhead.
 
-**Seeing whether it pays.** Hit rate is the number that matters, readable three ways:
+**Seeing whether it pays.** Hit rate is the number that matters, readable two ways:
 
-- **At shutdown**, a statistics snapshot at `INFO` -- hits, misses, hit rate, rotations, capacity -- when the servlet container destroys the filter. **Not visible under Spring Boot**: by then Spring Boot has removed its `java.util.logging` bridge on context close, and the JDK's own shutdown hook has reset `java.util.logging`, so the line is dropped.
-- **On generation rotation**, the same snapshot, first at `INFO` and later at `FINE`. Rotation needs a generation's worth of misses, so a working set that fits the cache may never log it.
-- **Per lookup** at `FINE`, one line per hit or miss. Too chatty to leave on, useful for a short sample -- and under Spring Boot the way to read the hit rate when the cache does not rotate.
+- **On generation rotation**, a statistics snapshot -- hits, misses, hit rate, rotations, capacity -- first at `INFO` and later at `FINE`. Rotation needs a generation's worth of misses, so a working set that fits the cache may never log it.
+- **Per lookup** at `FINE`, one line per hit or miss. Too chatty to leave on, useful for a short sample.
 
 A low hit rate means the working set exceeds `2 x cache.size`: raise it or turn the cache off. It is opt-in deliberately -- the measurements are a benchmark, not production traffic. Note the JVM already caches parsed certificates (`sun.security.provider.X509Factory.certCache`, 750 soft-referenced entries), so applications serving fewer distinct callers than that are partly cached already; this cache earns most beyond that point, and on the XFCC field and Subject DN parsing the JDK's does not cover. [docs/PERFORMANCE.md](docs/PERFORMANCE.md) has the full picture.
 

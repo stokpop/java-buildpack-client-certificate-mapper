@@ -570,21 +570,6 @@ public final class ClientCertificateMapperTest {
     }
 
     @Test
-    public void destroyIsSafeWithAndWithoutCache() throws Exception {
-        System.clearProperty("org.cloudfoundry.router.certificate.cache.enabled");
-        new ClientCertificateMapper().destroy();
-
-        System.setProperty("org.cloudfoundry.router.certificate.cache.enabled", "true");
-        try {
-            ClientCertificateMapper mapper = new ClientCertificateMapper();
-            assertThat(mapper.certificateCache()).isNotNull();
-            mapper.destroy();
-        } finally {
-            System.clearProperty("org.cloudfoundry.router.certificate.cache.enabled");
-        }
-    }
-
-    @Test
     public void cacheDisabledByDefault() throws Exception {
         System.clearProperty("org.cloudfoundry.router.certificate.cache.enabled");
         assertThat(new ClientCertificateMapper().certificateCache()).isNull();
