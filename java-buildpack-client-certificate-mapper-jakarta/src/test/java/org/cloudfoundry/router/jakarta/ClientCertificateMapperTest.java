@@ -180,8 +180,8 @@ public final class ClientCertificateMapperTest {
         assertThat((X509Certificate[]) this.request.getAttribute(ClientCertificateMapper.ATTRIBUTE)).hasSize(2);
     }
 
-    /** Each entry in a multi-header request is cached independently, keyed by its own digest, so a
-     *  repeat request with the same two (distinct) headers must hit both cache slots and reproduce
+    /** Each entry in a multi-header request is cached independently, keyed by its own header value,
+     *  so a repeat request with the same two (distinct) headers must hit both cache slots and reproduce
      *  the same objects in the same order -- caching must not merge, reorder, or cross-contaminate
      *  entries. */
     @Test
