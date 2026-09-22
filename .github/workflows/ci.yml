@@ -22,7 +22,8 @@ on:
 # either cancel the other could leave the merge untested.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Never cancel on main: a cancelled snapshot job could leave the rolling release deleted.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   test:

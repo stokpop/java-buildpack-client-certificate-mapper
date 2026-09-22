@@ -16,8 +16,15 @@ on:
 permissions:
   contents: write
 
+# A second run for the same tag (publish plus a manual re-run) waits instead of racing the upload.
+concurrency:
+  group: release-${{ github.event.release.tag_name || inputs.tag }}
+  cancel-in-progress: false
+
 jobs:
   release:
+    # Pre-releases, such as the rolling snapshot, are not versioned releases.
+    if: github.event_name == 'workflow_dispatch' || !github.event.release.prerelease
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
