@@ -68,7 +68,7 @@ import java.util.logging.Logger;
  *   Gorouter raw base64, no cache / cached:   5.2 / 2.3 us
  *   CF app-identity,     no cache / cached:   2.1 / 0.5 us
  * </pre>
- * Keying on a SHA-256 digest instead was measured at 13.1 us against 2.0 us for the raw value on a
+ * Keying on a SHA-256 digest instead was measured at 13.0 us against 2.0 us for the raw value on a
  * 1.3 KB header ({@code CacheKeyBenchmark}), which is why that design was dropped.
  * Keying on the value also removes the question of key collisions entirely: two different headers
  * cannot map to one cached certificate, because {@code equals} decides every hit.

@@ -55,7 +55,7 @@ $ java -jar java-buildpack-client-certificate-mapper-benchmark/target/benchmarks
 | `RAW_BASE64` | CF Gorouter `xfcc_format: raw`, i.e. certificates arriving from outside the platform | base64 decode, ASN.1 parse |
 | `IDENTITY_ONLY` | CF app-identity on an mTLS domain (`Hash=` + `Subject=`) | field scan and Subject DN parse; there is no certificate |
 
-**The measurement setup**, which matters more than any single number here: a 2012 Mac mini running Linux -- bare metal, so no hypervisor steal time or noisy neighbours -- with an Intel i7-3615QM, 4 physical cores / 8 threads, and Liberica OpenJDK 25.0.2 unless a row says 27, which is Liberica OpenJDK 27+36 (GA, 2026-09-15). It has **no SHA-256 hardware acceleration** -- `sha_ni` is absent from `/proc/cpuinfo`, as it is on every pre-2016 Intel part -- which is why a digest cache key measured so badly here: `CacheKeyBenchmark` below puts it at 13.1 us against 2.0 us for the raw value. On a CPU with the SHA extensions the digest is far cheaper and that gap narrows; how far is not measured here, so treat the key choice as re-checkable rather than settled if your hardware has them.
+**The measurement setup**, which matters more than any single number here: a 2012 Mac mini running Linux -- bare metal, so no hypervisor steal time or noisy neighbours -- with an Intel i7-3615QM, 4 physical cores / 8 threads, and Liberica OpenJDK 25.0.2 unless a row says 27, which is Liberica OpenJDK 27+36 (GA, 2026-09-15). It has **no SHA-256 hardware acceleration** -- `sha_ni` is absent from `/proc/cpuinfo`, as it is on every pre-2016 Intel part -- which is why a digest cache key measured so badly here: `CacheKeyBenchmark` below puts it at 13.0 us against 2.0 us for the raw value. On a CPU with the SHA extensions the digest is far cheaper and that gap narrows; how far is not measured here, so treat the key choice as re-checkable rather than settled if your hardware has them.
 
 Turbo is **disabled** (`intel_pstate/no_turbo=1`) and the governor set to `performance`, so every core runs at the 2.3 GHz base clock, and each benchmark JVM is pinned with `taskset -c 0-3` to the four physical cores, one thread per core rather than two sharing an SMT pair. Package temperature settles at ~76 C, so nothing throttles. This is not fussiness: with turbo enabled, a single-threaded run clocks up to 3.3 GHz while a four-thread run throttles below base, which inflates single-thread results and deflates multi-thread ones -- enough on its own to make a scaling ratio look like 1.0x when it is 1.4x. Absolute numbers here are therefore ~40% slower than a turbo-enabled run would report, and the ratios are the part worth reading.
 
@@ -213,14 +213,14 @@ Check the third row before believing an application is on BouncyCastle: `addProv
 
 ## Cache key: digest vs raw value
 
-`CacheKeyBenchmark` isolates the key strategy, looking up a pre-populated map from a freshly built `String`:
+`CacheKeyBenchmark` isolates the key strategy, looking up a pre-populated map from a freshly built `String`; the digest side reproduces the removed production code, hex conversion included. Measured on Liberica 25.0.4:
 
 | Key strategy | 1.3 KB header (us) | 2.4 KB header (us) | B/op at 1.3 KB |
 | --- | --- | --- | --- |
-| SHA-256 hex digest | 13.1 | 23.2 | 3392 |
-| Raw header value | **2.0** | **3.6** | **1344** |
+| SHA-256 hex digest | 13.0 | 23.0 | 3464 |
+| Raw header value | **2.0** | **3.7** | **1344** |
 
-The raw value is the faster key here by ~6.6x at 1.3 KB and ~6.4x at 2.4 KB, because `String.hashCode()` costs about one cycle per byte where SHA-256 costs about ten on a CPU without the SHA extensions. With them the digest gets much cheaper; this machine cannot measure by how much. **An earlier version of this document claimed the digest key was ~14.6x faster; that does not reproduce and has been removed** -- it likely computed the digest outside the timed region, charging that strategy nothing for work the request path performs every call.
+The raw value is the faster key here by ~6.5x at 1.3 KB and ~6.3x at 2.4 KB, because `String.hashCode()` costs about one cycle per byte where SHA-256 costs about ten on a CPU without the SHA extensions. With them the digest gets much cheaper; this machine cannot measure by how much. **An earlier version of this document claimed the digest key was ~14.6x faster; that does not reproduce and has been removed** -- it likely computed the digest outside the timed region, charging that strategy nothing for work the request path performs every call.
 
 The digest key's remaining advantage is memory: a 64-character key against a value key retaining the whole header, roughly 1.4-1.8 KB per entry for CF-shaped headers and more where `maxHttpHeaderSize` was raised. The filter pays that for the speed, bounded by `cache.size`. A value key also removes the collision question -- `equals()` confirms every hit -- at the cost of being the caller-supplied string, which `ConcurrentHashMap` handles by treeifying degenerate buckets.
 

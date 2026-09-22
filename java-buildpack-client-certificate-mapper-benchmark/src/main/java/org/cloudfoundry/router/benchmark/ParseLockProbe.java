@@ -21,6 +21,7 @@ import java.security.Security;
 import java.security.cert.CertificateFactory;
 import java.util.Base64;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.LongAdder;
 
 /**
@@ -68,6 +69,7 @@ public final class ParseLockProbe {
                 : CertificateFactory.getInstance("X.509", register(provider));
 
         LongAdder ops = new LongAdder();
+        AtomicReference<Throwable> failure = new AtomicReference<>();
         CountDownLatch start = new CountDownLatch(1);
         long deadline = System.currentTimeMillis() + millis;
         Thread[] workers = new Thread[threads];
@@ -79,15 +81,15 @@ public final class ParseLockProbe {
                     return;
                 }
                 int i = 0;
-                while (System.currentTimeMillis() < deadline) {
-                    for (int n = 0; n < 100; n++) {
-                        try {
+                try {
+                    while (System.currentTimeMillis() < deadline) {
+                        for (int n = 0; n < 100; n++) {
                             factory.generateCertificate(new ByteArrayInputStream(der[i++ % der.length]));
-                        } catch (Exception e) {
-                            throw new RuntimeException(e);
                         }
+                        ops.add(100);
                     }
-                    ops.add(100);
+                } catch (Exception e) {
+                    failure.compareAndSet(null, e);
                 }
             }, "parser-" + t);
             workers[t].start();
@@ -96,6 +98,10 @@ public final class ParseLockProbe {
         start.countDown();
         for (Thread w : workers) {
             w.join();
+        }
+        // A failed parse must fail the probe, not show up as merely lower throughput.
+        if (failure.get() != null) {
+            throw new IllegalStateException("A parser thread failed", failure.get());
         }
         double seconds = (System.nanoTime() - t0) / 1e9;
         System.out.printf("%-10s threads=%d distinct=%-5d %,10.0f parses/s (%6.2f us/op per thread)%n",

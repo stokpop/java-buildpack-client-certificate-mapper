@@ -31,7 +31,7 @@ All options are JVM system properties.
 | Property | Default | What it does |
 | --- | --- | --- |
 | `org.cloudfoundry.router.certificate.cache.enabled` | `false` | Cache parsed certificates and reuse them across requests. Opt-in while it gathers field experience. |
-| `org.cloudfoundry.router.certificate.cache.size` | `128` | Entries per cache generation; about `2 x size` cached certificates (concurrent misses can briefly add one per thread) (~0.4-2.6 MB for CF-sized headers at the default). |
+| `org.cloudfoundry.router.certificate.cache.size` | `128` | Entries per cache generation; about `2 x size` cached XFCC entries (concurrent misses can briefly add one per thread) (~0.4-2.6 MB for CF-sized headers at the default). |
 | `org.cloudfoundry.router.certificate.header.hide` | `false` | Hide the XFCC header from downstream filters and servlets after parsing. |
 | `org.cloudfoundry.router.certificate.provider` | platform default | JCA provider used to parse certificates, e.g. `BC`. Useful only if the application already registers it -- see [docs/PROVIDERS.md](docs/PROVIDERS.md). |
 

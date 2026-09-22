@@ -108,7 +108,7 @@ final class ClientCertificateMapper implements Filter {
         }
         StringBuilder message = new StringBuilder("Mapping ").append(HEADER).append(" to the ").append(ATTRIBUTE).append(" request attribute; certificate cache ");
         if (cacheEnabled) {
-            message.append("enabled (").append(CACHE_SIZE_PROPERTY).append('=').append(cacheSize).append(" entries per generation, up to ").append(2 * cacheSize).append(" cached certificates)");
+            message.append("enabled (").append(CACHE_SIZE_PROPERTY).append('=').append(cacheSize).append(" entries per generation, about ").append(2 * cacheSize).append(" cached XFCC entries)");
         } else {
             message.append("disabled (").append(CACHE_ENABLED_PROPERTY).append("=true to enable)");
         }

@@ -86,13 +86,18 @@ public class CacheKeyBenchmark {
         return this.byRawValue.get(new String(this.header));
     }
 
+    private static final char[] HEX = "0123456789abcdef".toCharArray();
+
+    /** Mirrors the digest key the resolver used before this branch keyed on the value itself. */
     private static String sha256Hex(String input) throws Exception {
         byte[] digest = MessageDigest.getInstance("SHA-256").digest(input.getBytes(StandardCharsets.UTF_8));
-        StringBuilder out = new StringBuilder(digest.length * 2);
-        for (byte b : digest) {
-            out.append(Character.forDigit((b >> 4) & 0xf, 16)).append(Character.forDigit(b & 0xf, 16));
+        char[] out = new char[digest.length * 2];
+        for (int i = 0; i < digest.length; i++) {
+            int b = digest[i] & 0xff;
+            out[i * 2] = HEX[b >>> 4];
+            out[i * 2 + 1] = HEX[b & 0x0f];
         }
-        return out.toString();
+        return new String(out);
     }
 
 }
