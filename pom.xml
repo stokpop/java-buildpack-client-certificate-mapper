@@ -25,12 +25,14 @@
 
     <groupId>org.cloudfoundry</groupId>
     <artifactId>java-buildpack-client-certificate-mapper-parent</artifactId>
-    <version>2.1.0-SNAPSHOT</version>
+    <version>${revision}</version>
     <packaging>pom</packaging>
     <name>Cloud Foundry Client Certificate Mapper</name>
     <description>Cloud Foundry Client Certificate Mapper</description>
 
     <properties>
+        <!-- The development version; .mvn/maven.config sets it for builds, a release sets -Drevision=X.Y.Z. See docs/RELEASE.md. -->
+        <revision>2.1.0-SNAPSHOT</revision>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     </properties>
 
@@ -125,6 +127,28 @@
                 </plugin>
             </plugins>
         </pluginManagement>
+        <plugins>
+            <plugin>
+                <!-- Resolves ${revision} in the installed and deployed POMs, so they carry the real version. -->
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>flatten-maven-plugin</artifactId>
+                <version>1.8.0</version>
+                <configuration>
+                    <flattenMode>resolveCiFriendliesOnly</flattenMode>
+                    <updatePomFile>true</updatePomFile>
+                    <outputDirectory>${project.build.directory}</outputDirectory>
+                </configuration>
+                <executions>
+                    <execution>
+                        <id>flatten</id>
+                        <phase>process-resources</phase>
+                        <goals>
+                            <goal>flatten</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
     </build>
 
     <profiles>

@@ -67,10 +67,24 @@ jobs:
           distribution: 'temurin'
           cache: 'maven'
 
+      # Only a -SNAPSHOT revision belongs in the rolling snapshot release; releases come from tags.
+      - name: Check snapshot version
+        id: version
+        run: |
+          VERSION=$(./mvnw help:evaluate -Dexpression=project.version -q -DforceStdout)
+          echo "Project version: ${VERSION}"
+          if [[ "${VERSION}" == *-SNAPSHOT ]]; then
+            echo "snapshot=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::main is at ${VERSION}, not a -SNAPSHOT: skipping the rolling snapshot release."
+          fi
+
       - name: Build
+        if: steps.version.outputs.snapshot == 'true'
         run: ./mvnw -q package -DskipTests
 
       - name: Collect artifacts
+        if: steps.version.outputs.snapshot == 'true'
         id: artifacts
         run: |
           JAR=$(ls java-buildpack-client-certificate-mapper/target/java-buildpack-client-certificate-mapper-*SNAPSHOT.jar \
@@ -81,6 +95,7 @@ jobs:
           echo "sources=$SOURCES" >> $GITHUB_OUTPUT
 
       - name: Recreate rolling snapshot release
+        if: steps.version.outputs.snapshot == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
