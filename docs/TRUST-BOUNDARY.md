@@ -17,6 +17,8 @@ Cached entries are not expiry-checked on retrieval, on hits or misses -- the sam
 
 The cache is keyed by the XFCC entry exactly as received, and `String.equals()` confirms every hit, so two different header values cannot resolve to one cached certificate. Earlier revisions keyed on a SHA-256 digest, making collisions a (cryptographically infeasible) correctness question; keying on the value removes the question rather than arguing it away.
 
+Enable the cache only behind a router that sanitizes `X-Forwarded-Client-Cert`. A client that controls the header can choose values with colliding Java hash codes, and misses on colliding values are parsed one at a time under a map lock rather than in parallel.
+
 ## Header hiding is fail-open for downstream checks
 
 With `org.cloudfoundry.router.certificate.header.hide=true`, the header is hidden whenever present, *regardless* of whether a certificate was parsed from it. Downstream code must not read "raw header absent" as "no client certificate was presented": a malformed or attacker-supplied value produces the same downstream signal as a request that never carried the header. Downstream authorization should key off the request attributes this filter sets, not raw header presence.
