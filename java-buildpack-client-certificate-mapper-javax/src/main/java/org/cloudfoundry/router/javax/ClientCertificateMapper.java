@@ -161,13 +161,7 @@ final class ClientCertificateMapper implements Filter {
         List<X509Certificate> certificates = new ArrayList<>();
 
         for (String rawValue : getRawCertificates(request)) {
-            ParsedXfcc parsed;
-            try {
-                parsed = this.resolver.resolve(rawValue);
-            } catch (CertificateException | IOException | RuntimeException e) {
-                publishIdentityOfUnparseableEntry(request, rawValue);
-                throw e;
-            }
+            ParsedXfcc parsed = this.resolver.resolve(rawValue);
             setXfccAttributes(request, parsed);
             if (parsed.certificate() != null) {
                 certificates.add(parsed.certificate());
@@ -175,20 +169,6 @@ final class ClientCertificateMapper implements Filter {
         }
 
         return certificates;
-    }
-
-    /**
-     * Publishes the XFCC identity attributes of an entry whose certificate could not be parsed, so
-     * a corrupt {@code Cert=} costs the caller only the certificate and not the router-supplied
-     * identity. Best-effort: a failure here must never replace the parse failure being reported.
-     */
-    private void publishIdentityOfUnparseableEntry(HttpServletRequest request, String rawValue) {
-        try {
-            setXfccAttributes(request, this.resolver.identity(rawValue));
-        } catch (RuntimeException e) {
-            this.logger.warning("Unable to read X-Forwarded-Client-Cert identity fields from an entry whose certificate"
-                + " failed to parse; no identity attributes were set for it.");
-        }
     }
 
     private void setXfccAttributes(HttpServletRequest request, ParsedXfcc parsed) {

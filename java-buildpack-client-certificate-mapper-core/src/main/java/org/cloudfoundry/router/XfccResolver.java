@@ -149,27 +149,6 @@ public final class XfccResolver {
         return parseEntry(new XfccEntry(rawValue), rawValue);
     }
 
-    /**
-     * The XFCC fields of {@code rawValue} without its certificate: the entry and any
-     * {@link CfSubjectDn}, never a decoded {@code Cert=}.
-     *
-     * <p>For the failure path. {@link #resolve(String)} decodes the certificate while building its
-     * bundle, so a corrupt {@code Cert=} throws before the caller sees any of the entry -- yet the
-     * {@code Hash=} and {@code Subject=} fields the router vouched for are intact and independent of
-     * the certificate blob. Callers publish those from here before letting the failure propagate,
-     * so an application that authorizes on the CF identity is not left unable to distinguish a
-     * corrupt certificate from a request that carried no client certificate at all.
-     *
-     * <p>Nothing is cached: this runs only when a parse has already failed.
-     */
-    public ParsedXfcc identity(String rawValue) {
-        XfccEntry xfcc = new XfccEntry(rawValue);
-        if (!xfcc.resemblesXfcc() || !xfcc.hasField(XfccField.SUBJECT)) {
-            return new ParsedXfcc(xfcc, null, null);
-        }
-        return new ParsedXfcc(xfcc, null, XfccHeaderParser.parseCfSubjectDn(xfcc.get(XfccField.SUBJECT)));
-    }
-
     /** Parses a pre-detected {@link XfccEntry} into a {@link ParsedXfcc} bundle: the entry, the
      *  decoded {@link X509Certificate} (if a {@code Cert=} field is present or the value is a raw
      *  certificate), and the {@link CfSubjectDn} derived from any {@code Subject=} field.
