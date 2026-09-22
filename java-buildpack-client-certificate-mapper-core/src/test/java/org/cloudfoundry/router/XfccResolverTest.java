@@ -340,33 +340,27 @@ public final class XfccResolverTest {
             X509Certificate expected = resolver.resolve(NGINX_ESCAPED_CERT).certificate();
             String plain = Base64.getEncoder().encodeToString(expected.getEncoded());
             String pkcs7 = Base64.getEncoder().encodeToString(pkcs7(expected.getEncoded()));
+            // The PKCS#7 input must parse on its own, or the concurrent run exercises nothing.
+            assertThat(resolver.resolve(pkcs7).certificate().getEncoded()).isEqualTo(expected.getEncoded());
 
             int threads = 8;
             ExecutorService pool = Executors.newFixedThreadPool(threads);
-            AtomicLong plainFailures = new AtomicLong();
+            AtomicLong failures = new AtomicLong();
             AtomicReference<Throwable> firstFailure = new AtomicReference<>();
             long end = System.nanoTime() + TimeUnit.SECONDS.toNanos(1);
             try {
                 List<Future<?>> workers = new ArrayList<>();
                 for (int t = 0; t < threads; t++) {
-                    boolean parsesPlain = t % 2 == 0;
+                    String input = t % 2 == 0 ? plain : pkcs7;
                     workers.add(pool.submit(() -> {
                         while (System.nanoTime() < end) {
-                            if (!parsesPlain) {
-                                try {
-                                    resolver.resolve(pkcs7);
-                                } catch (Exception e) {
-                                    // Only the ordinary certificate's outcome is under test.
-                                }
-                                continue;
-                            }
                             try {
-                                X509Certificate actual = resolver.resolve(plain).certificate();
+                                X509Certificate actual = resolver.resolve(input).certificate();
                                 if (actual == null || !Arrays.equals(actual.getEncoded(), expected.getEncoded())) {
-                                    plainFailures.incrementAndGet();
+                                    failures.incrementAndGet();
                                 }
                             } catch (Exception e) {
-                                plainFailures.incrementAndGet();
+                                failures.incrementAndGet();
                                 firstFailure.compareAndSet(null, e);
                             }
                         }
@@ -379,8 +373,8 @@ public final class XfccResolverTest {
                 pool.shutdownNow();
             }
 
-            assertThat(plainFailures.get())
-                    .as("ordinary certificate parses that failed or returned another certificate; first failure: %s",
+            assertThat(failures.get())
+                    .as("parses that failed or returned another certificate; first failure: %s",
                             firstFailure.get())
                     .isZero();
         } finally {

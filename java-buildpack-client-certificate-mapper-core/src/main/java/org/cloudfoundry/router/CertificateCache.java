@@ -47,6 +47,10 @@ import java.util.logging.Logger;
  * miss path per key. When many threads race with the same cache-cold key (e.g. a burst of requests
  * carrying the same XFCC header), only one thread invokes the supplier -- the others wait briefly on
  * the bucket lock and receive the computed result -- avoiding a thundering-herd parse spike.
+ * This holds within a generation: if the generation rotates while a parse is still running, a later
+ * request for the same key can start a second parse in the new generation. Both produce the same
+ * result, so only the work is duplicated, and only when a generation's worth of other misses
+ * arrives during one parse.
  * Different keys never block each other. Prefer {@code getOrCompute} over the raw {@link #get} /
  * {@link #put} pair on hot paths.
  *
@@ -181,8 +185,9 @@ public final class CertificateCache {
     }
 
     /**
-     * Returns the cached bundle for {@code key}, invoking {@code supplier} exactly once per key
-     * on a miss even when many threads race with the same key. This solves the cache-stampede
+     * Returns the cached bundle for {@code key}, invoking {@code supplier} once per key and
+     * generation on a miss even when many threads race with the same key (see the class
+     * documentation for the rotation case). This solves the cache-stampede
      * ("thundering herd") case where a burst of concurrent requests carrying the same XFCC header
      * would otherwise each parse the same certificate.
      *
