@@ -44,9 +44,11 @@ Automating that bump would need the workflow to push to the protected `main`. It
 
 ## Rebuilding a release locally
 
+The same command the Release workflow runs, with the release checks and tests:
+
 ```shell
 $ git checkout v2.1.0
-$ ./mvnw -Drevision=2.1.0 package
+$ ./mvnw -Prelease -Drevision=2.1.0 verify
 ```
 
 ## Getting a release into the Java buildpack
