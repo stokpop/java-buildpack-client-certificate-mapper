@@ -136,7 +136,7 @@ Caveats:
 
 ## Error handling
 
-Certificate parse failures (invalid base64, invalid `CertificateFactory` input, malformed URL-encoding such as `%GG`) are caught in `doFilter()`, logged as a `WARNING`, and the request continues down the chain without the certificate attribute set.
+A malformed header never fails the request: the filter logs a `WARNING` and passes the request on with **no** certificate and **no** XFCC attributes. One bad entry in a multi-entry header drops them all. Details in [docs/ERROR-HANDLING.md](docs/ERROR-HANDLING.md).
 
 ## Debug logging
 
@@ -146,6 +146,7 @@ The filter uses Java Util Logging. Set the `org.cloudfoundry.router` logger to `
 
 - [docs/TRUST-BOUNDARY.md](docs/TRUST-BOUNDARY.md) -- what the filter does and does not guarantee, and what your app should check
 - [docs/XFCC.md](docs/XFCC.md) -- header formats, detection rules, CF Gorouter specifics
+- [docs/ERROR-HANDLING.md](docs/ERROR-HANDLING.md) -- what happens when the header is malformed, and what fails the request
 - [docs/PROVIDERS.md](docs/PROVIDERS.md) -- choosing the JCA provider that parses certificates
 - [docs/PERFORMANCE.md](docs/PERFORMANCE.md) -- cache design, benchmarks, memory
 - [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) -- building from source, CI workflows
