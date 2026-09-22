@@ -159,6 +159,37 @@
                 <module>java-buildpack-client-certificate-mapper-benchmark</module>
             </modules>
         </profile>
+        <profile>
+            <!-- Active in the Release workflow: ./mvnw -Prelease -Drevision=X.Y.Z verify. See docs/RELEASE.md. -->
+            <id>release</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-enforcer-plugin</artifactId>
+                        <version>3.6.3</version>
+                        <executions>
+                            <execution>
+                                <id>enforce-release</id>
+                                <goals>
+                                    <goal>enforce</goal>
+                                </goals>
+                                <configuration>
+                                    <rules>
+                                        <requireReleaseVersion>
+                                            <message>A release must not be a -SNAPSHOT: build with -Drevision=X.Y.Z.</message>
+                                        </requireReleaseVersion>
+                                        <requireReleaseDeps>
+                                            <message>A release must not depend on -SNAPSHOT versions.</message>
+                                        </requireReleaseDeps>
+                                    </rules>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
     </profiles>
 
 </project>

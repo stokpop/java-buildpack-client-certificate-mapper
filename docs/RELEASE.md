@@ -26,9 +26,8 @@ The files at a release tag therefore still say `-SNAPSHOT`; the tag name is the 
 The **Release** workflow then:
 
 1. checks the tag has the form `vX.Y.Z`;
-2. checks out the tag and runs `./mvnw -Drevision=X.Y.Z verify`, the full test suite included;
-3. runs `.github/scripts/check-release-version.sh X.Y.Z`: the jars must be named `X.Y.Z`, every POM that gets published (the flattened POMs, and the shaded jar's dependency-reduced POM) must declare `X.Y.Z` with no `${revision}` and no `-SNAPSHOT` version, and the shaded jar's `pom.properties` must record `X.Y.Z`;
-4. attaches `java-buildpack-client-certificate-mapper-X.Y.Z.jar` with its `-sources` and `-javadoc` jars to the release.
+2. checks out the tag and runs `./mvnw -Prelease -Drevision=X.Y.Z verify`, the full test suite included. The `release` profile's `maven-enforcer-plugin` rules fail the build if any module or dependency is still a `-SNAPSHOT`;
+3. attaches `java-buildpack-client-certificate-mapper-X.Y.Z.jar` with its `-sources` and `-javadoc` jars to the release.
 
 ### When the workflow fails
 

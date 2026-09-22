@@ -43,15 +43,14 @@ jobs:
           distribution: 'temurin'
           cache: 'maven'
 
+      # The release profile fails the build if any module or dependency is still a -SNAPSHOT.
       - name: Build and test
-        run: ./mvnw -B -Drevision="${VERSION}" verify
-
-      - name: Check release version
-        run: .github/scripts/check-release-version.sh "${VERSION}"
+        run: ./mvnw -B -Prelease -Drevision="${VERSION}" verify
 
       # Publishing to Maven Central -- which the java-buildpack dependency pipeline watches -- goes
       # here once the org.cloudfoundry signing key and Central credentials are available as secrets.
 
+      # Naming each jar by version also fails the upload if the build produced a different version.
       - name: Attach artifacts to the release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
