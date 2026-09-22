@@ -16,14 +16,31 @@
 
 package org.cloudfoundry.router;
 
+import org.bouncycastle.asn1.ASN1Integer;
+import org.bouncycastle.asn1.ASN1Primitive;
+import org.bouncycastle.asn1.DERSet;
+import org.bouncycastle.asn1.pkcs.ContentInfo;
+import org.bouncycastle.asn1.pkcs.PKCSObjectIdentifiers;
+import org.bouncycastle.asn1.pkcs.SignedData;
+import org.bouncycastle.jce.provider.BouncyCastleProvider;
 import org.junit.jupiter.api.Test;
 
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.security.Security;
 import java.security.cert.CertificateException;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Base64;
+import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -307,6 +324,76 @@ public final class XfccResolverTest {
         assertThat(new XfccResolver(null, "SUN").providerName()).isEqualTo("SUN");
         assertThat(new XfccResolver(null, "NoSuchProviderXyz").providerName()).isEqualTo(platformDefault);
         assertThat(new XfccResolver(null, "SunJCE").providerName()).isEqualTo(platformDefault);
+    }
+
+    /**
+     * BouncyCastle's {@code CertificateFactory} keeps per-parse state in unsynchronized instance
+     * fields, and a PKCS#7 {@code SignedData} input parks its certificate set there. One resolver
+     * serves every request thread, so it must not share a factory instance across threads: a
+     * concurrent PKCS#7 value must never break or alter the parse of an ordinary certificate.
+     */
+    @Test
+    public void concurrentParsesOnANonThreadSafeProviderDoNotInterfere() throws Exception {
+        Security.addProvider(new BouncyCastleProvider());
+        try {
+            XfccResolver resolver = new XfccResolver(null, "BC");
+            X509Certificate expected = resolver.resolve(NGINX_ESCAPED_CERT).certificate();
+            String plain = Base64.getEncoder().encodeToString(expected.getEncoded());
+            String pkcs7 = Base64.getEncoder().encodeToString(pkcs7(expected.getEncoded()));
+
+            int threads = 8;
+            ExecutorService pool = Executors.newFixedThreadPool(threads);
+            AtomicLong plainFailures = new AtomicLong();
+            AtomicReference<Throwable> firstFailure = new AtomicReference<>();
+            long end = System.nanoTime() + TimeUnit.SECONDS.toNanos(1);
+            try {
+                List<Future<?>> workers = new ArrayList<>();
+                for (int t = 0; t < threads; t++) {
+                    boolean parsesPlain = t % 2 == 0;
+                    workers.add(pool.submit(() -> {
+                        while (System.nanoTime() < end) {
+                            if (!parsesPlain) {
+                                try {
+                                    resolver.resolve(pkcs7);
+                                } catch (Exception e) {
+                                    // Only the ordinary certificate's outcome is under test.
+                                }
+                                continue;
+                            }
+                            try {
+                                X509Certificate actual = resolver.resolve(plain).certificate();
+                                if (actual == null || !Arrays.equals(actual.getEncoded(), expected.getEncoded())) {
+                                    plainFailures.incrementAndGet();
+                                }
+                            } catch (Exception e) {
+                                plainFailures.incrementAndGet();
+                                firstFailure.compareAndSet(null, e);
+                            }
+                        }
+                    }));
+                }
+                for (Future<?> worker : workers) {
+                    worker.get();
+                }
+            } finally {
+                pool.shutdownNow();
+            }
+
+            assertThat(plainFailures.get())
+                    .as("ordinary certificate parses that failed or returned another certificate; first failure: %s",
+                            firstFailure.get())
+                    .isZero();
+        } finally {
+            Security.removeProvider("BC");
+        }
+    }
+
+    /** A certs-only PKCS#7 {@code SignedData} carrying {@code der}, as {@code openssl crl2pkcs7} emits. */
+    private static byte[] pkcs7(byte[] der) throws Exception {
+        SignedData signedData = new SignedData(new ASN1Integer(1), new DERSet(),
+                new ContentInfo(PKCSObjectIdentifiers.data, null), new DERSet(ASN1Primitive.fromByteArray(der)),
+                null, new DERSet());
+        return new ContentInfo(PKCSObjectIdentifiers.signedData, signedData).getEncoded();
     }
 
     private static String pem(String base64, String lineEnding) {

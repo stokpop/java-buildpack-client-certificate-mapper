@@ -30,6 +30,7 @@ import org.openjdk.jmh.annotations.State;
 import org.openjdk.jmh.annotations.Warmup;
 
 import java.io.ByteArrayInputStream;
+import java.security.Provider;
 import java.security.Security;
 import java.security.cert.Certificate;
 import java.security.cert.CertificateFactory;
@@ -44,6 +45,10 @@ import java.util.concurrent.TimeUnit;
  * JVM serializes on one monitor. BouncyCastle has no such cache and no such lock. Two working-set
  * sizes separate the effects: {@code distinct=16} fits the JDK cache (so SUN measures a cache hit
  * plus the lock), {@code distinct=2000} does not (so SUN measures a real parse plus the lock).
+ *
+ * <p>{@code factory=shared} parses through one {@code CertificateFactory} instance, safe here only
+ * because the input is plain DER; {@code factory=perCall} creates one per parse from the pinned
+ * {@code Provider} object, as {@code XfccResolver} does, since the SPI does not promise thread safety.
  */
 @BenchmarkMode(Mode.AverageTime)
 @OutputTimeUnit(TimeUnit.MICROSECONDS)
@@ -59,9 +64,14 @@ public class ParseProviderBenchmark {
     @Param({"16", "2000"})
     public int distinct;
 
+    @Param({"shared", "perCall"})
+    public String factory;
+
     private byte[][] der;
 
-    private CertificateFactory factory;
+    private CertificateFactory sharedFactory;
+
+    private Provider pinnedProvider;
 
     @Setup
     public void setUp() throws Exception {
@@ -75,16 +85,20 @@ public class ParseProviderBenchmark {
             if (Security.getProvider(BouncyCastleProvider.PROVIDER_NAME) == null) {
                 Security.addProvider(new BouncyCastleProvider());
             }
-            this.factory = CertificateFactory.getInstance("X.509", BouncyCastleProvider.PROVIDER_NAME);
+            this.sharedFactory = CertificateFactory.getInstance("X.509", BouncyCastleProvider.PROVIDER_NAME);
         } else {
-            this.factory = CertificateFactory.getInstance("X.509");
+            this.sharedFactory = CertificateFactory.getInstance("X.509");
         }
+        this.pinnedProvider = this.sharedFactory.getProvider();
     }
 
     @Benchmark
     public Certificate parse(XfccResolverBenchmark.Cursor cursor) throws Exception {
         byte[] encoded = this.der[cursor.next(this.der.length)];
-        return this.factory.generateCertificate(new ByteArrayInputStream(encoded));
+        CertificateFactory factory = "perCall".equals(this.factory)
+                ? CertificateFactory.getInstance("X.509", this.pinnedProvider)
+                : this.sharedFactory;
+        return factory.generateCertificate(new ByteArrayInputStream(encoded));
     }
 
 }

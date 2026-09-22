@@ -23,6 +23,7 @@ import java.io.UnsupportedEncodingException;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.security.NoSuchProviderException;
+import java.security.Provider;
 import java.security.cert.CertificateException;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
@@ -46,7 +47,14 @@ public final class XfccResolver {
 
     private static final String PEM_END = "-----END CERTIFICATE-----";
 
-    private final CertificateFactory certificateFactory;
+    /**
+     * The provider every certificate is parsed with, chosen once at construction. A fresh
+     * {@link CertificateFactory} is created from it per parse: the SPI does not promise thread
+     * safety, and BouncyCastle's factory keeps per-parse state in instance fields. Creating it from
+     * the {@code Provider} object rather than by name also keeps the choice fixed when the
+     * application registers or removes providers later.
+     */
+    private final Provider provider;
 
     /** {@code null} when caching is disabled. */
     private final CertificateCache certificateCache;
@@ -77,7 +85,7 @@ public final class XfccResolver {
      * narrows the lock but does not remove it. See {@code docs/PERFORMANCE.md}.
      */
     public XfccResolver(CertificateCache certificateCache, String providerName) throws CertificateException {
-        this.certificateFactory = certificateFactory(providerName);
+        this.provider = certificateFactory(providerName).getProvider();
         this.certificateCache = certificateCache;
     }
 
@@ -103,7 +111,7 @@ public final class XfccResolver {
     /** The name of the JCA provider certificates are actually parsed with -- after any fallback from
      *  a requested provider that was not usable, so this can differ from what was asked for. */
     public String providerName() {
-        return this.certificateFactory.getProvider().getName();
+        return this.provider.getName();
     }
 
     /** The certificate cache in use, or {@code null} when caching is disabled. */
@@ -192,7 +200,7 @@ public final class XfccResolver {
 
     private X509Certificate generateCertificate(String certData) throws CertificateException, IOException {
         try (InputStream in = new ByteArrayInputStream(decodeHeader(certData))) {
-            return (X509Certificate) this.certificateFactory.generateCertificate(in);
+            return (X509Certificate) CertificateFactory.getInstance("X.509", this.provider).generateCertificate(in);
         }
     }
 
