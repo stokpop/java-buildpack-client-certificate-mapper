@@ -37,6 +37,14 @@ All options are JVM system properties.
 
 [Configuration](#configuration) covers when to change these; [docs/PERFORMANCE.md](docs/PERFORMANCE.md) has the measurements.
 
+The filter logs its effective configuration once at startup, at `INFO`:
+
+```
+Mapping X-Forwarded-Client-Cert to the jakarta.servlet.request.X509Certificate request attribute; certificate cache enabled (org.cloudfoundry.router.certificate.cache.size=128 entries per generation, about 256 cached XFCC entries); X-Forwarded-Client-Cert header stripping disabled (org.cloudfoundry.router.certificate.header.hide=true to enable); certificates parsed with JCA provider BC
+```
+
+The provider named is the one actually in use -- after any fallback, and including one the application registered first -- so it can differ from what `org.cloudfoundry.router.certificate.provider` asked for.
+
 ## Usage
 
 ### Read the client certificate
