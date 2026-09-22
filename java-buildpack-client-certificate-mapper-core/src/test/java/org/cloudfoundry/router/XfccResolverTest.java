@@ -1,5 +1,5 @@
 /*
- * Copyright 2017-2023 the original author or authors.
+ * Copyright 2017-2026 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,17 +16,47 @@
 
 package org.cloudfoundry.router;
 
+import org.bouncycastle.asn1.ASN1Integer;
+import org.bouncycastle.asn1.ASN1Primitive;
+import org.bouncycastle.asn1.DERSet;
+import org.bouncycastle.asn1.pkcs.ContentInfo;
+import org.bouncycastle.asn1.pkcs.PKCSObjectIdentifiers;
+import org.bouncycastle.asn1.pkcs.SignedData;
+import org.bouncycastle.jce.provider.BouncyCastleProvider;
 import org.junit.jupiter.api.Test;
 
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
+import java.security.Security;
+import java.security.cert.CertificateException;
+import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Base64;
+import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 public final class XfccResolverTest {
 
     private static final String HASH = "078c0ea84e084ea1c8bf4719ede79c5b078c0ea84e084ea1c8bf4719ede79c5b";
 
+    /**
+     * An over-escaped URL-encoded PEM: every {@code -} is written {@code %2D}. Real nginx
+     * ({@code $ssl_client_escaped_cert}) and Envoy leave {@code -} literal, since both escape only
+     * outside the RFC 3986 unreserved set -- that form is covered by
+     * {@link #envoyUrlEncodedPemCertificateIsDecoded()}. Kept as the fixture because a value that
+     * escapes more than it must is the harder input to decode, and routers do vary.
+     */
     private static final String NGINX_ESCAPED_CERT = "" +
         "%2D%2D%2D%2D%2DBEGIN%20CERTIFICATE%2D%2D%2D%2D%2D%0D%0AMIIDLTCCA" +
         "hWgAwIBAgIkMDg3ZjVmZGMtOThkNy00MGMwLTY0ZDMtZmQ5NWFmODMx%0D%0AOTh" +
@@ -50,6 +80,35 @@ public final class XfccResolverTest {
         "0D%0AXcqQm8pYsDxi%2BHTGS6an78sHqrvU5uQJq2MW8o6iBJR80bFgWSl7GTqK3" +
         "Xz5iTxU%0D%0AEw%3D%3D%0D%0A%2D%2D%2D%2D%2DEND%20CERTIFICATE%2D%2" +
         "D%2D%2D%2D%0D%0A";
+
+    @Test
+    public void unknownProviderFallsBackToPlatformDefault() throws Exception {
+        XfccResolver resolver = new XfccResolver(null, "NoSuchProviderXyz");
+
+        ParsedXfcc parsed = resolver.resolve(NGINX_ESCAPED_CERT);
+
+        assertThat(parsed.certificate()).isNotNull();
+    }
+
+    @Test
+    public void providerWithoutX509FallsBackToPlatformDefault() throws Exception {
+        // SunJCE is always registered but offers no X.509 CertificateFactory, like providers that
+        // only accelerate ciphers and digests (e.g. Amazon Corretto Crypto Provider).
+        XfccResolver resolver = new XfccResolver(null, "SunJCE");
+
+        ParsedXfcc parsed = resolver.resolve(NGINX_ESCAPED_CERT);
+
+        assertThat(parsed.certificate()).isNotNull();
+    }
+
+    @Test
+    public void namedProviderIsUsedWhenRegistered() throws Exception {
+        XfccResolver resolver = new XfccResolver(null, "SUN");
+
+        ParsedXfcc parsed = resolver.resolve(NGINX_ESCAPED_CERT);
+
+        assertThat(parsed.certificate()).isNotNull();
+    }
 
     @Test
     public void identityOnlyXfccIsAlsoCached() throws Exception {
@@ -101,8 +160,8 @@ public final class XfccResolverTest {
     /**
      * Covers the other of the two supported raw-certificate formats: plain base64-encoded DER
      * (no PEM armor, no URL-encoding), as produced e.g. by CF Gorouter's {@code xfcc_format: raw}.
-     * {@code decodeHeader} tries {@link java.util.Base64} first and only falls back to
-     * {@link java.net.URLDecoder} when that fails, so this exercises the base64 branch exclusively
+     * {@code decodeHeader} detects the format instead of trying decoders in turn: a value with no
+     * percent sign and no PEM armor is base64 DER, so this exercises the base64 branch exclusively
      * and confirms it never touches the URL-decode/UTF-8 path.
      */
     @Test
@@ -173,5 +232,207 @@ public final class XfccResolverTest {
 
         assertThat(resolver.cache()).isNull();
         assertThat(parsed.certificate()).isNotNull();
+    }
+    /**
+     * PEM that reaches the filter without URL-encoding at all. The armor is detected directly, so
+     * the value never goes near the base64 or URL-decode branches.
+     */
+    @Test
+    public void unencodedPemCertificateIsDecoded() throws Exception {
+        XfccResolver resolver = new XfccResolver(null);
+        X509Certificate expected = resolver.resolve(NGINX_ESCAPED_CERT).certificate();
+        String pem = pem(Base64.getEncoder().encodeToString(expected.getEncoded()), "\n");
+
+        ParsedXfcc parsed = resolver.resolve(pem);
+
+        assertThat(parsed.certificate().getEncoded()).isEqualTo(expected.getEncoded());
+    }
+
+    /**
+     * Envoy encodes its {@code Cert=} PEM with {@link java.net.URLEncoder}, which leaves {@code -}
+     * literal and turns the space in {@code BEGIN CERTIFICATE} into {@code +}. nginx percent-encodes
+     * the dashes instead ({@link #NGINX_ESCAPED_CERT}); both must decode to the same DER.
+     */
+    @Test
+    public void envoyUrlEncodedPemCertificateIsDecoded() throws Exception {
+        XfccResolver resolver = new XfccResolver(null);
+        X509Certificate expected = resolver.resolve(NGINX_ESCAPED_CERT).certificate();
+        String encoded = URLEncoder.encode(pem(Base64.getEncoder().encodeToString(expected.getEncoded()), "\n"),
+                StandardCharsets.UTF_8.name());
+
+        ParsedXfcc parsed = resolver.resolve("Hash=" + HASH + ";Cert=" + encoded);
+
+        assertThat(parsed.certificate().getEncoded()).isEqualTo(expected.getEncoded());
+    }
+
+    /**
+     * A value that is neither base64 nor PEM still fails the way it always has: the bytes reach
+     * {@code CertificateFactory}, which rejects them, rather than escaping as some other exception.
+     */
+    @Test
+    public void unrecognisedCertificateValueStillFailsAsCertificateException() throws Exception {
+        XfccResolver resolver = new XfccResolver(null);
+
+        assertThatThrownBy(() -> resolver.resolve("Hash=" + HASH + ";Cert=not%20a%20certificate"))
+                .isInstanceOf(CertificateException.class);
+    }
+
+    /** A PEM that arrived with no line breaks at all, which a header can carry unencoded. */
+    @Test
+    public void singleLinePemCertificateIsDecoded() throws Exception {
+        XfccResolver resolver = new XfccResolver(null);
+        X509Certificate expected = resolver.resolve(NGINX_ESCAPED_CERT).certificate();
+        String base64 = Base64.getEncoder().encodeToString(expected.getEncoded());
+
+        ParsedXfcc parsed = resolver.resolve("-----BEGIN CERTIFICATE-----" + base64 + "-----END CERTIFICATE-----");
+
+        assertThat(parsed.certificate().getEncoded()).isEqualTo(expected.getEncoded());
+    }
+
+    /**
+     * A PEM body carrying a character that is neither base64 nor whitespace is corrupt. A MIME
+     * decoder skips such characters and would hand back the original DER, so the corruption must
+     * be rejected here -- and not recovered by {@code CertificateFactory}'s own lenient PEM reader.
+     */
+    @Test
+    public void pemWithIllegalCharacterInBodyIsRejected() throws Exception {
+        XfccResolver resolver = new XfccResolver(null);
+        X509Certificate expected = resolver.resolve(NGINX_ESCAPED_CERT).certificate();
+        String base64 = Base64.getEncoder().encodeToString(expected.getEncoded());
+        String corrupt = pem(base64.substring(0, 100) + "*" + base64.substring(100), "\n");
+
+        assertThatThrownBy(() -> resolver.resolve(corrupt))
+                .isInstanceOf(CertificateException.class);
+    }
+
+    @Test
+    public void urlEncodedPemWithIllegalCharacterInBodyIsRejected() throws Exception {
+        XfccResolver resolver = new XfccResolver(null);
+        X509Certificate expected = resolver.resolve(NGINX_ESCAPED_CERT).certificate();
+        String base64 = Base64.getEncoder().encodeToString(expected.getEncoded());
+        String encoded = URLEncoder.encode(pem(base64.substring(0, 100) + "*" + base64.substring(100), "\n"),
+                StandardCharsets.UTF_8.name());
+
+        assertThatThrownBy(() -> resolver.resolve("Hash=" + HASH + ";Cert=" + encoded))
+                .isInstanceOf(CertificateException.class);
+    }
+
+    @Test
+    public void providerNameReportsTheProviderInUse() throws Exception {
+        String platformDefault = CertificateFactory.getInstance("X.509").getProvider().getName();
+
+        assertThat(new XfccResolver(null).providerName()).isEqualTo(platformDefault);
+        assertThat(new XfccResolver(null, "SUN").providerName()).isEqualTo("SUN");
+        assertThat(new XfccResolver(null, "NoSuchProviderXyz").providerName()).isEqualTo(platformDefault);
+        assertThat(new XfccResolver(null, "SunJCE").providerName()).isEqualTo(platformDefault);
+    }
+
+    /**
+     * BouncyCastle's {@code CertificateFactory} keeps per-parse state in unsynchronized instance
+     * fields, and a PKCS#7 {@code SignedData} input parks its certificate set there. One resolver
+     * serves every request thread, so it must not share a factory instance across threads: a
+     * concurrent PKCS#7 value must never break or alter the parse of an ordinary certificate.
+     */
+    @Test
+    public void concurrentParsesOnANonThreadSafeProviderDoNotInterfere() throws Exception {
+        Security.addProvider(new BouncyCastleProvider());
+        try {
+            XfccResolver resolver = new XfccResolver(null, "BC");
+            X509Certificate expected = resolver.resolve(NGINX_ESCAPED_CERT).certificate();
+            String plain = Base64.getEncoder().encodeToString(expected.getEncoded());
+            String pkcs7 = Base64.getEncoder().encodeToString(pkcs7(expected.getEncoded()));
+            // The PKCS#7 input must parse on its own, or the concurrent run exercises nothing.
+            assertThat(resolver.resolve(pkcs7).certificate().getEncoded()).isEqualTo(expected.getEncoded());
+
+            int threads = 8;
+            ExecutorService pool = Executors.newFixedThreadPool(threads);
+            AtomicLong failures = new AtomicLong();
+            AtomicReference<Throwable> firstFailure = new AtomicReference<>();
+            long end = System.nanoTime() + TimeUnit.SECONDS.toNanos(1);
+            try {
+                List<Future<?>> workers = new ArrayList<>();
+                for (int t = 0; t < threads; t++) {
+                    String input = t % 2 == 0 ? plain : pkcs7;
+                    workers.add(pool.submit(() -> {
+                        while (System.nanoTime() < end) {
+                            try {
+                                X509Certificate actual = resolver.resolve(input).certificate();
+                                if (actual == null || !Arrays.equals(actual.getEncoded(), expected.getEncoded())) {
+                                    failures.incrementAndGet();
+                                }
+                            } catch (Exception e) {
+                                failures.incrementAndGet();
+                                firstFailure.compareAndSet(null, e);
+                            }
+                        }
+                    }));
+                }
+                for (Future<?> worker : workers) {
+                    worker.get(2, TimeUnit.SECONDS);
+                }
+            } finally {
+                pool.shutdownNow();
+            }
+
+            assertThat(failures.get())
+                    .as("parses that failed or returned another certificate; first failure: %s",
+                            firstFailure.get())
+                    .isZero();
+        } finally {
+            Security.removeProvider("BC");
+        }
+    }
+
+    /**
+     * {@code resolve} consults {@link CertificateCache#peek} (which records nothing on a miss) and
+     * then {@link CertificateCache#getOrCompute}, which parses outside any lock. Threads racing on
+     * one cold header may each parse it, but every call is counted exactly once -- a miss if it
+     * parsed, a hit if it did not -- so the hit rate cannot exceed 100%, and all of them receive the
+     * one stored bundle.
+     */
+    @Test
+    public void concurrentResolvesOfOneHeaderCountEveryCallOnce() throws Exception {
+        CertificateCache cache = new CertificateCache(16);
+        XfccResolver resolver = new XfccResolver(cache);
+        String rawValue = "Hash=" + HASH + ";Cert=" + NGINX_ESCAPED_CERT;
+
+        int threads = 32;
+        ExecutorService pool = Executors.newFixedThreadPool(threads);
+        CountDownLatch start = new CountDownLatch(1);
+        try {
+            List<Future<ParsedXfcc>> results = new ArrayList<>();
+            for (int t = 0; t < threads; t++) {
+                results.add(pool.submit(() -> {
+                    start.await();
+                    return resolver.resolve(rawValue);
+                }));
+            }
+            start.countDown();
+            ParsedXfcc stored = results.get(0).get(2, TimeUnit.SECONDS);
+            for (Future<ParsedXfcc> result : results) {
+                assertThat(result.get(2, TimeUnit.SECONDS)).isSameAs(stored);
+            }
+        } finally {
+            pool.shutdownNow();
+        }
+
+        assertThat(cache.getMissCount()).isPositive();
+        assertThat(cache.getHitCount() + cache.getMissCount()).isEqualTo(threads);
+    }
+
+    /** A certs-only PKCS#7 {@code SignedData} carrying {@code der}, as {@code openssl crl2pkcs7} emits. */
+    private static byte[] pkcs7(byte[] der) throws Exception {
+        SignedData signedData = new SignedData(new ASN1Integer(1), new DERSet(),
+                new ContentInfo(PKCSObjectIdentifiers.data, null), new DERSet(ASN1Primitive.fromByteArray(der)),
+                null, new DERSet());
+        return new ContentInfo(PKCSObjectIdentifiers.signedData, signedData).getEncoded();
+    }
+
+    private static String pem(String base64, String lineEnding) {
+        StringBuilder pem = new StringBuilder("-----BEGIN CERTIFICATE-----").append(lineEnding);
+        for (int i = 0; i < base64.length(); i += 64) {
+            pem.append(base64, i, Math.min(i + 64, base64.length())).append(lineEnding);
+        }
+        return pem.append("-----END CERTIFICATE-----").append(lineEnding).toString();
     }
 }

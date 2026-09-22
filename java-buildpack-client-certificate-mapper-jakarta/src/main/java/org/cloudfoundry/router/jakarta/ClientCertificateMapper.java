@@ -1,5 +1,5 @@
 /*
- * Copyright 2017-2023 the original author or authors.
+ * Copyright 2017-2026 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -59,6 +59,8 @@ final class ClientCertificateMapper implements Filter {
 
     private static final String CACHE_SIZE_PROPERTY = "org.cloudfoundry.router.certificate.cache.size";
 
+    private static final String PROVIDER_PROPERTY = "org.cloudfoundry.router.certificate.provider";
+
     private static final int DEFAULT_CACHE_SIZE = 128;
 
     private final Logger logger = Logger.getLogger(this.getClass().getName());
@@ -69,7 +71,7 @@ final class ClientCertificateMapper implements Filter {
     private final boolean stripXfccHeader;
 
     ClientCertificateMapper() throws CertificateException {
-        boolean cacheEnabled = "true".equalsIgnoreCase(System.getProperty(CACHE_ENABLED_PROPERTY, "true"));
+        boolean cacheEnabled = "true".equalsIgnoreCase(System.getProperty(CACHE_ENABLED_PROPERTY, "false"));
         int cacheSize = DEFAULT_CACHE_SIZE;
         CertificateCache cache = null;
         if (cacheEnabled) {
@@ -87,7 +89,8 @@ final class ClientCertificateMapper implements Filter {
             }
             cache = new CertificateCache(cacheSize);
         }
-        this.resolver = new XfccResolver(cache);
+        String provider = System.getProperty(PROVIDER_PROPERTY);
+        this.resolver = new XfccResolver(cache, provider);
         this.stripXfccHeader = "true".equalsIgnoreCase(System.getProperty(STRIP_HEADER_PROPERTY, "false"));
         logConfiguration(cacheEnabled, cacheSize);
     }
@@ -105,7 +108,7 @@ final class ClientCertificateMapper implements Filter {
         }
         StringBuilder message = new StringBuilder("Mapping ").append(HEADER).append(" to the ").append(ATTRIBUTE).append(" request attribute; certificate cache ");
         if (cacheEnabled) {
-            message.append("enabled (").append(CACHE_SIZE_PROPERTY).append('=').append(cacheSize).append(" entries per generation, up to ").append(2 * cacheSize).append(" cached certificates)");
+            message.append("enabled (").append(CACHE_SIZE_PROPERTY).append('=').append(cacheSize).append(" entries per generation, about ").append(2 * cacheSize).append(" cached XFCC entries)");
         } else {
             message.append("disabled (").append(CACHE_ENABLED_PROPERTY).append("=true to enable)");
         }
@@ -115,6 +118,9 @@ final class ClientCertificateMapper implements Filter {
         } else {
             message.append("disabled (").append(STRIP_HEADER_PROPERTY).append("=true to enable)");
         }
+        // The provider actually in use, not the one requested: an unusable name falls back to the
+        // platform default, and the resolver has already warned about that.
+        message.append("; certificates parsed with JCA provider ").append(this.resolver.providerName());
         this.logger.info(message.toString());
     }
 
@@ -132,8 +138,9 @@ final class ClientCertificateMapper implements Filter {
                 if (!certificates.isEmpty()) {
                     request.setAttribute(ATTRIBUTE, certificates.toArray(new X509Certificate[0]));
                 }
-            // IllegalArgumentException: malformed %xx in URL-encoded cert value; treat same as parse failure
-            } catch (CertificateException | IllegalArgumentException e) {
+            // IllegalArgumentException: malformed %xx in URL-encoded cert value; treat same as parse failure.
+            // IOException: declared by the resolver's decode path; degrade the same way rather than fail the request.
+            } catch (CertificateException | IOException | IllegalArgumentException e) {
                 this.logger.warning("Unable to parse certificates in X-Forwarded-Client-Cert");
             }
             // Only wrap when the header is actually present -- avoids allocation on requests without a cert.
@@ -151,10 +158,15 @@ final class ClientCertificateMapper implements Filter {
     }
 
     private List<X509Certificate> getCertificates(HttpServletRequest request) throws CertificateException, IOException {
-        List<X509Certificate> certificates = new ArrayList<>();
-
+        // Resolve every entry before publishing anything: one entry that fails to parse makes the
+        // whole header untrustworthy, so it must not leave the identity of the others behind.
+        List<ParsedXfcc> entries = new ArrayList<>();
         for (String rawValue : getRawCertificates(request)) {
-            ParsedXfcc parsed = this.resolver.resolve(rawValue);
+            entries.add(this.resolver.resolve(rawValue));
+        }
+
+        List<X509Certificate> certificates = new ArrayList<>();
+        for (ParsedXfcc parsed : entries) {
             setXfccAttributes(request, parsed);
             if (parsed.certificate() != null) {
                 certificates.add(parsed.certificate());

@@ -1,5 +1,5 @@
 /*
- * Copyright 2017-2023 the original author or authors.
+ * Copyright 2017-2026 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -30,10 +30,18 @@ import java.security.cert.CertificateException;
 import java.security.cert.CertificateExpiredException;
 import java.security.cert.CertificateNotYetValidException;
 import java.security.cert.X509Certificate;
+import java.util.ArrayList;
 import java.util.Date;
+import java.util.List;
 import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 public final class CertificateCacheTest {
@@ -193,7 +201,7 @@ public final class CertificateCacheTest {
         CertificateCache cache = new CertificateCache(4);
         ParsedXfcc entry = fakeEntry();
         cache.put("key1", entry);
-        java.util.concurrent.atomic.AtomicInteger supplierInvocations = new java.util.concurrent.atomic.AtomicInteger();
+        AtomicInteger supplierInvocations = new AtomicInteger();
 
         ParsedXfcc result = cache.getOrCompute("key1", () -> {
             supplierInvocations.incrementAndGet();
@@ -204,59 +212,81 @@ public final class CertificateCacheTest {
         assertThat(supplierInvocations).hasValue(0);
     }
 
+    /**
+     * {@code "Aa"} and {@code "BB"} have the same {@link String#hashCode()}, so they share a hash bin;
+     * a client that controls the header can produce thousands of such values. Their misses must be
+     * parsed in parallel: the first parse here waits until the second has started, which is
+     * impossible if parsing runs under the bin lock.
+     */
     @Test
-    public void getOrComputeInvokesSupplierExactlyOncePerKeyUnderConcurrentMiss() throws Exception {
-        // Reproduces the thundering-herd case: many threads with the same cache-cold key must
-        // trigger the supplier only once. This is the scenario that caused a parse-spike under
-        // 100 tps of identical XFCC headers before getOrCompute was introduced.
+    public void missesOnCollidingKeysAreParsedInParallel() throws Exception {
+        assertThat("Aa".hashCode()).isEqualTo("BB".hashCode());
         CertificateCache cache = new CertificateCache(128);
-        java.util.concurrent.atomic.AtomicInteger supplierInvocations = new java.util.concurrent.atomic.AtomicInteger();
-        ParsedXfcc sharedEntry = fakeEntry();
-        int threadCount = 100;
-        java.util.concurrent.CountDownLatch start = new java.util.concurrent.CountDownLatch(1);
-        java.util.concurrent.CountDownLatch done = new java.util.concurrent.CountDownLatch(threadCount);
-        java.util.concurrent.ExecutorService pool = java.util.concurrent.Executors.newFixedThreadPool(threadCount);
-        java.util.List<ParsedXfcc> results = java.util.Collections.synchronizedList(new java.util.ArrayList<>());
+        CountDownLatch firstStarted = new CountDownLatch(1);
+        CountDownLatch secondStarted = new CountDownLatch(1);
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        try {
+            Future<ParsedXfcc> first = pool.submit(() -> cache.getOrCompute("Aa", () -> {
+                firstStarted.countDown();
+                boolean secondRan;
+                try {
+                    secondRan = secondStarted.await(2, SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    secondRan = false;
+                }
+                if (!secondRan) {
+                    throw new CertificateException("the parse of a colliding key never started: parses are serialized");
+                }
+                return fakeEntry();
+            }));
+            assertThat(firstStarted.await(2, SECONDS)).isTrue();
+            Future<ParsedXfcc> second = pool.submit(() -> cache.getOrCompute("BB", () -> {
+                secondStarted.countDown();
+                return fakeEntry();
+            }));
 
+            assertThat(first.get(2, SECONDS)).isNotNull();
+            assertThat(second.get(2, SECONDS)).isNotNull();
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    /**
+     * Many threads missing on the same cold key at once may each parse it -- the parse runs outside
+     * any lock -- but all of them must receive the one instance that was stored, and every call must
+     * be counted exactly once: a miss for each call that parsed, a hit for each that did not.
+     */
+    @Test
+    public void concurrentMissesOnOneKeyAllReturnTheStoredInstance() throws Exception {
+        CertificateCache cache = new CertificateCache(128);
+        AtomicInteger supplierInvocations = new AtomicInteger();
+        int threadCount = 100;
+        CountDownLatch start = new CountDownLatch(1);
+        ExecutorService pool = Executors.newFixedThreadPool(threadCount);
+        List<Future<ParsedXfcc>> results = new ArrayList<>();
         try {
             for (int i = 0; i < threadCount; i++) {
-                pool.submit(() -> {
-                    try {
-                        start.await();
-                        results.add(cache.getOrCompute("shared-key", () -> {
-                            supplierInvocations.incrementAndGet();
-                            // Small pause so concurrent threads all reach computeIfAbsent while the
-                            // first supplier is still running — this is what a real cert parse does.
-                            try {
-                                Thread.sleep(20);
-                            } catch (InterruptedException ignored) {
-                                Thread.currentThread().interrupt();
-                            }
-                            return sharedEntry;
-                        }));
-                    } catch (Exception e) {
-                        throw new RuntimeException(e);
-                    } finally {
-                        done.countDown();
-                    }
-                });
+                results.add(pool.submit(() -> {
+                    start.await();
+                    return cache.getOrCompute("shared-key", () -> {
+                        supplierInvocations.incrementAndGet();
+                        return fakeEntry();
+                    });
+                }));
             }
             start.countDown();
-            assertThat(done.await(10, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+            ParsedXfcc stored = results.get(0).get(2, SECONDS);
+            for (Future<ParsedXfcc> result : results) {
+                assertThat(result.get(2, SECONDS)).isSameAs(stored);
+            }
         } finally {
             pool.shutdownNow();
         }
 
-        assertThat(supplierInvocations).hasValue(1);
-        assertThat(results).hasSize(threadCount);
-        for (ParsedXfcc result : results) {
-            assertThat(result).isSameAs(sharedEntry);
-        }
-        // The single winning thread records a miss; every other thread that raced on the same
-        // key and received the already-computed value without parsing must record a hit, not
-        // be dropped from the counters entirely.
-        assertThat(cache.getMissCount()).isEqualTo(1);
-        assertThat(cache.getHitCount()).isEqualTo(threadCount - 1);
+        assertThat(cache.getMissCount()).isEqualTo(supplierInvocations.get());
+        assertThat(cache.getHitCount() + cache.getMissCount()).isEqualTo(threadCount);
     }
 
     @Test
@@ -268,7 +298,7 @@ public final class CertificateCacheTest {
         })).isInstanceOf(CertificateException.class).hasMessage("bad cert");
 
         // Next call retries — no poisoned entry left behind.
-        java.util.concurrent.atomic.AtomicInteger invocations = new java.util.concurrent.atomic.AtomicInteger();
+        AtomicInteger invocations = new AtomicInteger();
         ParsedXfcc entry = fakeEntry();
         try {
             ParsedXfcc result = cache.getOrCompute("key1", () -> {

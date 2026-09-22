@@ -16,6 +16,14 @@ on:
       - 'NOTICE'
   workflow_dispatch:
 
+# Cancel a run superseded by a newer one for the same ref, e.g. a second push to a branch before
+# the first build finished. Push and pull_request runs deliberately stay in separate groups: a push
+# run builds the branch head, a pull_request run builds the merge with the base branch, and letting
+# either cancel the other could leave the merge untested.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest

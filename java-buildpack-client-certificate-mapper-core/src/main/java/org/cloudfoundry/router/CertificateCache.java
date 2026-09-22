@@ -1,5 +1,5 @@
 /*
- * Copyright 2017-2023 the original author or authors.
+ * Copyright 2017-2026 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -31,7 +31,9 @@ import java.util.logging.Logger;
  * {@code prevGen}. Lookups check current first, then previous. When the current generation
  * reaches {@code maxGenSize}, it is promoted to previous (the old previous is discarded) and
  * a fresh current generation starts. This keeps memory bounded at approximately
- * {@code 2 * maxGenSize} entries while avoiding any locking on the read path.
+ * {@code 2 * maxGenSize} entries while avoiding any locking on the read path. The bound is not
+ * exact: a generation is checked for room before an insert, so threads missing at the same moment
+ * can each add one entry past {@code maxGenSize}.
  *
  * <p><b>What is cached.</b> The cache value is a {@link ParsedXfcc} bundle: the parsed
  * {@link XfccEntry}, the decoded {@link java.security.cert.X509Certificate}, and, when present,
@@ -40,40 +42,46 @@ import java.util.logging.Logger;
  * CF subject DN parsing, both of which showed up in profiler traces even after X.509 parsing was
  * already being cached.
  *
- * <p><b>Concurrent parse deduplication.</b> {@link #getOrCompute(String, ParsedXfccSupplier)} uses
- * {@link ConcurrentHashMap#computeIfAbsent(Object, java.util.function.Function)} to serialize the
- * miss path per key. When many threads race with the same cache-cold key (e.g. a burst of requests
- * carrying the same XFCC header), only one thread invokes the supplier -- the others wait briefly on
- * the bucket lock and receive the computed result -- avoiding a thundering-herd parse spike.
- * Different keys never block each other. Prefer {@code getOrCompute} over the raw {@link #get} /
- * {@link #put} pair on hot paths.
+ * <p><b>Concurrent misses.</b> {@link #getOrCompute(String, ParsedXfccSupplier)} parses outside
+ * any map lock and publishes the result with {@link ConcurrentHashMap#putIfAbsent}. Threads that miss
+ * on the same cache-cold key at the same moment each parse it; the first result stored wins and
+ * every caller receives that one instance. The extra parses are the price of never holding a lock
+ * while parsing: {@code computeIfAbsent} would deduplicate them, but it runs the parse under the
+ * hash-bin lock, so a client that controls the header could pick values with colliding hash codes
+ * and have their misses parsed one at a time. Prefer {@code getOrCompute} over the raw
+ * {@link #get} / {@link #put} pair on hot paths.
  *
- * <p><b>Why not key by the raw certificate string.</b> Using the full ~1.3 KB {@code Cert=} (or raw
- * header) value directly as the map key was measured to burn most of the cache's benefit: because
- * each request produces a fresh {@code String} instance from XFCC substring parsing,
- * {@link String#hashCode()} cannot be reused across requests and traverses the whole key on every
- * lookup, and a hit also requires a full-length {@link String#equals(Object)}. JMH measurement on
- * JDK 25 (single-threaded, {@code AverageTime}, 5+5 iterations x 2 forks):
+ * <p><b>Why the header value is the key.</b> Keys are the raw {@code X-Forwarded-Client-Cert}
+ * entry exactly as received. Each request produces a fresh {@code String} from header parsing, so
+ * {@link String#hashCode()} is computed once per lookup, traversing the value at roughly one cycle
+ * per byte, and a hit is confirmed by a full {@link String#equals(Object)}. Deriving a SHA-256
+ * digest to use as a shorter key was measured to cost more than it saves: the digest traverses the
+ * same bytes at roughly ten cycles per byte on hardware without SHA extensions, which exceeds the
+ * certificate parse the cache exists to avoid. JMH, single thread, working set of 16, platform
+ * provider, no SHA hardware acceleration (see {@code docs/PERFORMANCE.md} for the full matrix and
+ * the measurement setup):
  * <pre>
- *   parse the cert every call (no cache):            ~3620 ns/op
- *   cache hit keyed by the raw ~1.3 KB cert string:  ~1890 ns/op  (only 1.9x vs no cache)
- *   cache hit keyed by 64-char SHA-256 hex digest:    ~130 ns/op  (28x vs no cache)
+ *   Envoy Cert= PEM,     no cache / cached:  24.3 / 3.0 us
+ *   Gorouter raw base64, no cache / cached:   5.2 / 2.3 us
+ *   CF app-identity,     no cache / cached:   2.1 / 0.5 us
  * </pre>
- * Deriving a short digest recovers ~14.6x of the per-hit cost and -- under real concurrent load --
- * removes the compounded per-request CPU that made a raw-key cache measurably worse than no cache
- * at all in field measurements.
+ * Keying on a SHA-256 digest instead was measured at 13.0 us against 2.0 us for the raw value on a
+ * 1.3 KB header ({@code CacheKeyBenchmark}), which is why that design was dropped.
+ * Keying on the value also removes the question of key collisions entirely: two different headers
+ * cannot map to one cached certificate, because {@code equals} decides every hit.
  *
- * <p><b>Memory budget.</b> Keys are 64-character SHA-256 hex digests derived from the raw header
- * value the entry was parsed from. Deriving the key ensures only a request carrying the actual
- * header can produce a hit, and keeps {@link String#hashCode()} and {@link String#equals(Object)}
- * on the cache key cheap on every lookup. Note that the digest is taken over the header string as
- * received -- the URL-encoded PEM or base64 DER -- not over the decoded DER bytes, so the key
- * intentionally differs from the Envoy XFCC {@code Hash=} field (which is defined as SHA-256 of the
- * DER). This is fine for cache identity (same header value produces the same key) but means the two
- * hashes are not cross-comparable. With the default generation size of 128, the cache holds at most
- * ~256 {@link ParsedXfcc} bundles plus ~16 KB of key strings.
- * If this is a concern, disable caching via the
- * {@code org.cloudfoundry.router.certificate.cache.enabled} system property.
+ * <p><b>Memory budget.</b> A key is the header string itself -- typically 1.4-1.8 KB for CF-shaped
+ * headers, and as large as the container's {@code maxHttpHeaderSize} allows where that limit has
+ * been raised for certificates with long chains. Each value is a {@link ParsedXfcc} holding the
+ * parsed {@link java.security.cert.X509Certificate} and the {@link XfccEntry} it came from, which
+ * retains the recognised field values. Measured on JDK 21 with 256 CF-shaped entries: ~7.8 KB per
+ * entry reachable (raw base64) or ~10.6 KB (Envoy PEM), of which only ~1.5 KB is retained
+ * exclusively by this cache -- the rest is shared with the JVM's own parsed-certificate cache
+ * ({@code sun.security.provider.X509Factory}, 750 soft-referenced entries). Beyond that cache's
+ * reach, or once its soft references are cleared, this cache owns the full amount, so the bound is
+ * {@code 2 x size x (header bytes + parsed certificate)}: ~0.4 MB to ~2 MB at the default size for
+ * CF-shaped headers. Size the cache with {@code org.cloudfoundry.router.certificate.cache.size}, or
+ * disable it entirely via {@code org.cloudfoundry.router.certificate.cache.enabled}.
  *
  * <p><b>Security note.</b> Cached entries are not expiry-checked on retrieval. The filter
  * does not validate certificate validity on cache hits (nor on misses), consistent with
@@ -91,8 +99,10 @@ import java.util.logging.Logger;
  * {@code FINE}, so traffic with mostly unique certificates cannot flood the log. Rotation is used as
  * the reporting interval because it needs no timer and no clock reads on the request path.
  *
- * <p>Use {@link #get(String)} and {@link #put(String, ParsedXfcc)} as the only entry
- * points so the implementation can be replaced without touching call sites.
+ * <p>Go through {@link #peek(String)} and {@link #getOrCompute(String, ParsedXfccSupplier)} on the
+ * request path, so the implementation can be replaced without touching call sites and every lookup
+ * is counted. {@link #get(String)} and {@link #put(String, ParsedXfcc)} remain for callers that need
+ * the two halves separately.
  */
 public final class CertificateCache {
 
@@ -115,8 +125,8 @@ public final class CertificateCache {
      * finds the current generation already full, which is rare relative to overall traffic.
      * Without this guard, multiple threads can observe the same full generation concurrently and
      * each perform a swap, cascading through several generations in quick succession: this
-     * discards entries other racing threads just added, can defeat the stampede-deduplication
-     * guarantee of {@link #getOrCompute}, and breaks the {@code 2 * maxGenSize} memory bound.
+     * discards entries other racing threads just added and breaks the {@code 2 * maxGenSize}
+     * memory bound.
      */
     private final Object rotationLock = new Object();
 
@@ -172,23 +182,16 @@ public final class CertificateCache {
     }
 
     /**
-     * Returns the cached bundle for {@code key}, invoking {@code supplier} exactly once per key
-     * on a miss even when many threads race with the same key. This solves the cache-stampede
-     * ("thundering herd") case where a burst of concurrent requests carrying the same XFCC header
-     * would otherwise each parse the same certificate.
-     *
-     * <p>Serialization is achieved by delegating the miss path to
-     * {@link ConcurrentHashMap#computeIfAbsent(Object, java.util.function.Function)} on the current
-     * generation. That call locks only the target bucket while the mapping function runs, so
-     * concurrent callers with different keys never block each other. Callers with the same key have
-     * at most one thread actually parse; the rest wait briefly and receive the computed result.
+     * Returns the cached bundle for {@code key}, invoking {@code supplier} on a miss. The supplier
+     * runs outside any lock; the result is published with {@code putIfAbsent}, so threads racing on
+     * the same cold key may each parse it, but all of them receive the one instance that was stored.
+     * Each call counts once: a hit when the value was already cached, a miss when this call parsed.
      *
      * <p>If {@code supplier} throws, the exception is propagated to the caller and no entry is
      * stored; the next request retries the parse.
      */
     public ParsedXfcc getOrCompute(String key, ParsedXfccSupplier supplier)
             throws CertificateException, IOException {
-        // Fast path: no lock, no wait for concurrent parsers.
         ParsedXfcc value = currentGen.get(key);
         if (value != null) {
             recordHit();
@@ -199,37 +202,11 @@ public final class CertificateCache {
             recordHit();
             return value;
         }
-        // Rotate before entering computeIfAbsent -- the mapping function must not mutate currentGen.
+        recordMiss();
+        ParsedXfcc parsed = supplier.parse();
         rotateIfFull();
-        // computeIfAbsent guarantees the mapping function runs at most once per key, but callers
-        // that lose the race still return through this same call without ever invoking it. Track
-        // whether *this* call was the one that parsed, so racing callers are still counted (as a
-        // hit, since they got the value without parsing) instead of silently missing both counters.
-        boolean[] parsed = {false};
-        try {
-            ParsedXfcc result = currentGen.computeIfAbsent(key, k -> {
-                parsed[0] = true;
-                recordMiss();
-                try {
-                    return supplier.parse();
-                } catch (CertificateException | IOException e) {
-                    throw new WrappedCheckedException(e);
-                }
-            });
-            if (!parsed[0]) {
-                recordHit();
-            }
-            return result;
-        } catch (WrappedCheckedException e) {
-            Throwable cause = e.getCause();
-            if (cause instanceof CertificateException) {
-                throw (CertificateException) cause;
-            }
-            if (cause instanceof IOException) {
-                throw (IOException) cause;
-            }
-            throw new RuntimeException(cause);
-        }
+        ParsedXfcc stored = currentGen.putIfAbsent(key, parsed);
+        return stored != null ? stored : parsed;
     }
 
     private void rotateIfFull() {
@@ -265,16 +242,6 @@ public final class CertificateCache {
     public interface ParsedXfccSupplier {
 
         ParsedXfcc parse() throws CertificateException, IOException;
-    }
-
-    /** Carries a checked exception out of {@link ConcurrentHashMap#computeIfAbsent}. */
-    private static final class WrappedCheckedException extends RuntimeException {
-
-        private static final long serialVersionUID = 1L;
-
-        WrappedCheckedException(Throwable cause) {
-            super(cause);
-        }
     }
 
     /** Returns the number of lookups that were served from the cache. */
