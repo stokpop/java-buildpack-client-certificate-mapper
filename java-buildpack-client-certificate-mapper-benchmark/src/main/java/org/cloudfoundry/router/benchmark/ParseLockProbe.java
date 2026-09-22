@@ -64,7 +64,7 @@ public final class ParseLockProbe {
         }
 
         CertificateFactory factory = "SUN".equals(provider)
-                ? CertificateFactory.getInstance("X.509")
+                ? CertificateFactory.getInstance("X.509", "SUN")
                 : CertificateFactory.getInstance("X.509", register(provider));
 
         LongAdder ops = new LongAdder();

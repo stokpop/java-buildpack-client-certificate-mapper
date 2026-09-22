@@ -31,7 +31,9 @@ import java.util.logging.Logger;
  * {@code prevGen}. Lookups check current first, then previous. When the current generation
  * reaches {@code maxGenSize}, it is promoted to previous (the old previous is discarded) and
  * a fresh current generation starts. This keeps memory bounded at approximately
- * {@code 2 * maxGenSize} entries while avoiding any locking on the read path.
+ * {@code 2 * maxGenSize} entries while avoiding any locking on the read path. The bound is not
+ * exact: a generation is checked for room before an insert, so threads missing at the same moment
+ * can each add one entry past {@code maxGenSize}.
  *
  * <p><b>What is cached.</b> The cache value is a {@link ParsedXfcc} bundle: the parsed
  * {@link XfccEntry}, the decoded {@link java.security.cert.X509Certificate}, and, when present,

@@ -31,7 +31,7 @@ All options are JVM system properties.
 | Property | Default | What it does |
 | --- | --- | --- |
 | `org.cloudfoundry.router.certificate.cache.enabled` | `false` | Cache parsed certificates and reuse them across requests. Opt-in while it gathers field experience. |
-| `org.cloudfoundry.router.certificate.cache.size` | `128` | Entries per cache generation; at most `2 x size` cached certificates (~0.4-2.6 MB for CF-sized headers at the default). |
+| `org.cloudfoundry.router.certificate.cache.size` | `128` | Entries per cache generation; about `2 x size` cached certificates (concurrent misses can briefly add one per thread) (~0.4-2.6 MB for CF-sized headers at the default). |
 | `org.cloudfoundry.router.certificate.header.hide` | `false` | Hide the XFCC header from downstream filters and servlets after parsing. |
 | `org.cloudfoundry.router.certificate.provider` | platform default | JCA provider used to parse certificates, e.g. `BC`. Useful only if the application already registers it -- see [docs/PROVIDERS.md](docs/PROVIDERS.md). |
 
@@ -95,7 +95,7 @@ Off by default. Set `org.cloudfoundry.router.certificate.cache.enabled=true` to 
 
 Parsed results are then reused across requests carrying the same header value, skipping the base64/PEM decode, the ASN.1 parse and the Subject DN parse. Per call: 24.3 us to 3.0 us for an Envoy `Cert=` header, 5.2 us to 2.3 us for a Gorouter raw base64 certificate, 2.1 us to 0.5 us for a CF app-identity header. Entries are keyed by the header value, so only a byte-for-byte identical header hits.
 
-`cache.size` is the entries per generation, two generations, so `2 x size` entries -- roughly 0.4-2.6 MB at the default of 128 for CF-sized headers, more for chains. Size it to the number of distinct client certificates you serve, or leave it off: a cache that mostly misses is overhead.
+`cache.size` is the entries per generation, two generations, so `2 x size` entries -- plus up to one per thread missing at the same moment, since a generation is only checked for room before an insert -- roughly 0.4-2.6 MB at the default of 128 for CF-sized headers, more for chains. Size it to the number of distinct client certificates you serve, or leave it off: a cache that mostly misses is overhead.
 
 **Seeing whether it pays.** Hit rate is the number that matters, readable two ways:
 

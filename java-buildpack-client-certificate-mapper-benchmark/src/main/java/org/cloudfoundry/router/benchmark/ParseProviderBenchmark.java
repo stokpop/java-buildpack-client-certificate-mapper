@@ -87,7 +87,7 @@ public class ParseProviderBenchmark {
             }
             this.sharedFactory = CertificateFactory.getInstance("X.509", BouncyCastleProvider.PROVIDER_NAME);
         } else {
-            this.sharedFactory = CertificateFactory.getInstance("X.509");
+            this.sharedFactory = CertificateFactory.getInstance("X.509", "SUN");
         }
         this.pinnedProvider = this.sharedFactory.getProvider();
     }

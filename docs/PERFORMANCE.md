@@ -61,7 +61,7 @@ Turbo is **disabled** (`intel_pstate/no_turbo=1`) and the governor set to `perfo
 
 ## Results
 
-Time per `resolve()` call and bytes allocated per call, for three designs: no cache, cache keyed by a SHA-256 digest of the header, cache keyed by the header value. `workingSet` is the number of distinct certificates in rotation; the cache holds ~256, so 512 is the thrash case.
+Time per `resolve()` call and bytes allocated per call, with no cache and with the cache keyed by the header value. The SHA-256 digest key it replaced is compared separately, in `CacheKeyBenchmark` below. `workingSet` is the number of distinct certificates in rotation; the cache holds ~256, so 512 is the thrash case.
 
 **One thread, working set 16 (everything hits):**
 
@@ -248,7 +248,7 @@ JOL walks everything reachable from the cache; MAT reports the retained heap of 
 
 A parsed `X509Certificate` is **6.1x its DER** (1061 B DER, 6520 B object graph), which is why the entry dwarfs the key: keying on the header value rather than a 64-character digest added roughly 20% to a full cache, not 2x. The honest framing: this cache converts soft-reclaimable memory the collector may drop under pressure into strongly-held memory it may not.
 
-The rough sizing bound is `2 x cache.size x (header bytes + parsed certificate)`. Apps that raised `maxHttpHeaderSize` scale both terms and should lower `cache.size`; apps serving more distinct callers than `2 x cache.size` should raise it, since the cold-parse numbers above are what a miss costs.
+The rough sizing bound is `2 x cache.size x (header bytes + parsed certificate)`; concurrent misses can briefly add one entry per thread. Apps that raised `maxHttpHeaderSize` scale both terms and should lower `cache.size`; apps serving more distinct callers than `2 x cache.size` should raise it, since the cold-parse numbers above are what a miss costs.
 
 ### Reproducing the memory figures
 

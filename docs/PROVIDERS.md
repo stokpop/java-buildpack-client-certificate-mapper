@@ -96,9 +96,10 @@ choice only decides what a miss costs.
 
 [JDK-8345954](https://bugs.openjdk.org/browse/JDK-8345954) narrows the lock rather than removing it:
 the certificate is parsed outside it, and what remains guards check-and-insert on the cache instance
-instead of the `X509Factory` class. Measured, that helps misses (`SUN` scaling 2.73x to 3.00x at
-2000 distinct certificates) and leaves hits alone -- blocked time at four threads is 11,327 ms on
-JDK 25 and 11,328 ms on JDK 27, because `MemoryCache.get` and `put` remain `synchronized`.
+instead of the `X509Factory` class. Measured, that helps both paths a little (`SUN` scaling 1.38x to
+1.49x on hits, 3.01x to 3.27x on misses), but blocked time at four threads is unchanged -- 11,113 ms
+on JDK 25 and 11,202 ms on JDK 27 -- because `MemoryCache.get` and `put` remain `synchronized`. The
+full data set is in [PERFORMANCE.md](PERFORMANCE.md).
 
 Mind which releases it reaches, too. JDK 27 is not an LTS: GA 15 September 2026, six-month window,
 JDK 28 follows in March 2027. **A deployment tracking LTS goes from JDK 25 straight to JDK 29 in
