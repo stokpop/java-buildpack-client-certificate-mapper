@@ -15,4 +15,4 @@ $ ./mvnw clean package
 
 All workflows can be triggered from **Actions -> select workflow -> Run workflow**.
 
-The project version is `${revision}`, set in `.mvn/maven.config`; see [RELEASE.md](RELEASE.md).
+The project version is `${revision}`, a property in the root `pom.xml`; see [RELEASE.md](RELEASE.md).

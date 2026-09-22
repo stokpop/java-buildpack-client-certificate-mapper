@@ -31,7 +31,7 @@
     <description>Cloud Foundry Client Certificate Mapper</description>
 
     <properties>
-        <!-- The development version; .mvn/maven.config sets it for builds, a release sets -Drevision=X.Y.Z. See docs/RELEASE.md. -->
+        <!-- The development version, the only place it is set. Release and snapshot builds override it with -Drevision. See docs/RELEASE.md. -->
         <revision>2.1.0-SNAPSHOT</revision>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     </properties>

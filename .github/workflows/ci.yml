@@ -75,13 +75,15 @@ jobs:
           echo "Project version: ${VERSION}"
           if [[ "${VERSION}" == *-SNAPSHOT ]]; then
             echo "snapshot=true" >> "$GITHUB_OUTPUT"
+            # e.g. 2.1.0-SNAPSHOT built from a1b2c3d becomes 2.1.0-a1b2c3d-SNAPSHOT
+            echo "revision=${VERSION%-SNAPSHOT}-$(git rev-parse --short HEAD)-SNAPSHOT" >> "$GITHUB_OUTPUT"
           else
             echo "::notice::main is at ${VERSION}, not a -SNAPSHOT: skipping the rolling snapshot release."
           fi
 
       - name: Build
         if: steps.version.outputs.snapshot == 'true'
-        run: ./mvnw -q package -DskipTests
+        run: ./mvnw -q -Drevision="${{ steps.version.outputs.revision }}" package -DskipTests
 
       - name: Collect artifacts
         if: steps.version.outputs.snapshot == 'true'
@@ -99,12 +101,13 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          VERSION=$(./mvnw help:evaluate -Dexpression=project.version -q -DforceStdout)
+          REVISION="${{ steps.version.outputs.revision }}"
           gh release delete snapshot --yes 2>/dev/null || true
           git push origin :refs/tags/snapshot 2>/dev/null || true
           gh release create snapshot \
             --prerelease \
-            --title "Latest SNAPSHOT ($VERSION)" \
-            --notes "Automatically published on every push to \`main\`. Always reflects the latest snapshot build." \
+            --target "${{ github.sha }}" \
+            --title "Latest SNAPSHOT ($REVISION)" \
+            --notes "Automatically published on every push to \`main\`. Always reflects the latest snapshot build, from commit ${{ github.sha }}." \
             "${{ steps.artifacts.outputs.jar }}" \
             "${{ steps.artifacts.outputs.sources }}"

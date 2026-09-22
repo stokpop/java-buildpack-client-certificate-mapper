@@ -29,8 +29,9 @@ for suffix in "" "-sources" "-javadoc"; do
   fi
 done
 
-# Every flattened POM must carry the release version, with ${revision} resolved.
-poms=$(find . -path '*/target/.flattened-pom.xml' -not -path './.git/*')
+# Every flattened POM must carry the release version, with ${revision} resolved. The benchmark module
+# is built only with -Pbenchmarks and never published, so a stale POM there does not count.
+poms=$(find . -path '*/target/.flattened-pom.xml' -not -path './.git/*' -not -path "./${MODULE}-benchmark/*")
 if [[ -z "${poms}" ]]; then
   fail "no target/.flattened-pom.xml found -- did the build run?"
 fi
@@ -46,6 +47,22 @@ for pom in ${poms}; do
     fail "${pom} does not declare version ${VERSION}"
   fi
 done
+
+# The shaded module publishes the shade plugin's dependency-reduced POM instead of the flattened one.
+reduced="${MODULE}/dependency-reduced-pom.xml"
+if [[ ! -f "${reduced}" ]]; then
+  fail "missing ${reduced}"
+else
+  if grep -q '\${revision}' "${reduced}"; then
+    fail "${reduced} still contains \${revision}"
+  fi
+  if grep -q -- '<version>[^<]*-SNAPSHOT</version>' "${reduced}"; then
+    fail "${reduced} contains a -SNAPSHOT version"
+  fi
+  if ! grep -q "<version>${VERSION}</version>" "${reduced}"; then
+    fail "${reduced} does not declare version ${VERSION}"
+  fi
+fi
 
 # The version recorded inside the shaded jar.
 shaded="${MODULE}/target/${MODULE}-${VERSION}.jar"
