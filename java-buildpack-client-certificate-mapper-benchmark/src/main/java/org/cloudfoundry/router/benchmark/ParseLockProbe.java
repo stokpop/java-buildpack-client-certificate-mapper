@@ -64,6 +64,9 @@ public final class ParseLockProbe {
             der[i] = Base64.getDecoder().decode(headers[i]);
         }
 
+        // One factory shared by all threads, unlike XfccResolver's factory per parse. Safe here: the
+        // input is plain DER only, where a shared BouncyCastle factory's per-parse state never
+        // crosses threads (its PKCS#7 path is what races), and any failed parse fails the probe.
         CertificateFactory factory = "SUN".equals(provider)
                 ? CertificateFactory.getInstance("X.509", "SUN")
                 : CertificateFactory.getInstance("X.509", register(provider));

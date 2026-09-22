@@ -158,10 +158,15 @@ final class ClientCertificateMapper implements Filter {
     }
 
     private List<X509Certificate> getCertificates(HttpServletRequest request) throws CertificateException, IOException {
-        List<X509Certificate> certificates = new ArrayList<>();
-
+        // Resolve every entry before publishing anything: one entry that fails to parse makes the
+        // whole header untrustworthy, so it must not leave the identity of the others behind.
+        List<ParsedXfcc> entries = new ArrayList<>();
         for (String rawValue : getRawCertificates(request)) {
-            ParsedXfcc parsed = this.resolver.resolve(rawValue);
+            entries.add(this.resolver.resolve(rawValue));
+        }
+
+        List<X509Certificate> certificates = new ArrayList<>();
+        for (ParsedXfcc parsed : entries) {
             setXfccAttributes(request, parsed);
             if (parsed.certificate() != null) {
                 certificates.add(parsed.certificate());

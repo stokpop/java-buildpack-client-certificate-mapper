@@ -609,6 +609,33 @@ public final class ClientCertificateMapperTest {
     }
 
     /**
+     * One corrupt entry makes the whole header untrustworthy: a request whose second entry cannot
+     * be parsed must not keep the certificate or the identity of the first. Publishing the first
+     * entry's identity without any certificate would be a partial state the application cannot
+     * tell apart from a genuine identity-only header.
+     */
+    @Test
+    public void corruptEntryPublishesNothingForAnyEntry() throws IOException, ServletException {
+        this.request.addHeader(ClientCertificateMapper.HEADER,
+            "Hash=078c0ea84e084ea1c8bf4719ede79c5b078c0ea84e084ea1c8bf4719ede79c5b" +
+                ";Subject=\"CN=12345678-1234-1234-1234-123456789012," +
+                "OU=app:aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb\"" +
+                ";Cert=" + NGINX_ESCAPED_CERT);
+        this.request.addHeader(ClientCertificateMapper.HEADER,
+            "Hash=078c0ea84e084ea1c8bf4719ede79c5b078c0ea84e084ea1c8bf4719ede79c5b" +
+                ";Cert=-----BEGIN%20CERTIFICATE-----%0Anot-a-certificate%0A-----END%20CERTIFICATE-----%0A");
+
+        this.mapper.doFilter(this.request, this.response, this.filterChain);
+
+        assertThat(this.filterChain.getRequest()).isNotNull();
+        assertThat(this.request.getAttribute(ClientCertificateMapper.ATTRIBUTE)).isNull();
+        assertThat(this.request.getAttribute(XfccAttributes.HASH)).isNull();
+        assertThat(this.request.getAttribute(XfccAttributes.SUBJECT)).isNull();
+        assertThat(this.request.getAttribute(XfccAttributes.APP_GUID)).isNull();
+        assertThat(this.request.getAttribute(XfccAttributes.INSTANCE_GUID)).isNull();
+    }
+
+    /**
      * A CF-shaped identity header whose {@code Cert=} blob is corrupt. A router that terminated the
      * TLS connection writes a valid certificate, so a corrupt one means the header is not what the
      * router produced; the identity fields beside it are not trusted either. The entry publishes

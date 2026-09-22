@@ -35,6 +35,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -380,6 +381,41 @@ public final class XfccResolverTest {
         } finally {
             Security.removeProvider("BC");
         }
+    }
+
+    /**
+     * {@code resolve} consults {@link CertificateCache#peek} (which records nothing on a miss) and
+     * then {@link CertificateCache#getOrCompute}. A thread whose peek misses but whose getOrCompute
+     * finds another thread's fresh entry counts a hit; the thread that parsed counts the one miss.
+     * Every call is counted exactly once, so the hit rate cannot exceed 100%.
+     */
+    @Test
+    public void concurrentResolvesOfOneHeaderCountEveryCallOnceAndParseOnce() throws Exception {
+        CertificateCache cache = new CertificateCache(16);
+        XfccResolver resolver = new XfccResolver(cache);
+        String rawValue = "Hash=" + HASH + ";Cert=" + NGINX_ESCAPED_CERT;
+
+        int threads = 32;
+        ExecutorService pool = Executors.newFixedThreadPool(threads);
+        CountDownLatch start = new CountDownLatch(1);
+        try {
+            List<Future<ParsedXfcc>> results = new ArrayList<>();
+            for (int t = 0; t < threads; t++) {
+                results.add(pool.submit(() -> {
+                    start.await();
+                    return resolver.resolve(rawValue);
+                }));
+            }
+            start.countDown();
+            for (Future<ParsedXfcc> result : results) {
+                assertThat(result.get().certificate()).isNotNull();
+            }
+        } finally {
+            pool.shutdownNow();
+        }
+
+        assertThat(cache.getMissCount()).isEqualTo(1);
+        assertThat(cache.getHitCount() + cache.getMissCount()).isEqualTo(threads);
     }
 
     /** A certs-only PKCS#7 {@code SignedData} carrying {@code der}, as {@code openssl crl2pkcs7} emits. */

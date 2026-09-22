@@ -45,8 +45,10 @@ import java.util.logging.Logger;
  * <p><b>Concurrent parse deduplication.</b> {@link #getOrCompute(String, ParsedXfccSupplier)} uses
  * {@link ConcurrentHashMap#computeIfAbsent(Object, java.util.function.Function)} to serialize the
  * miss path per key. When many threads race with the same cache-cold key (e.g. a burst of requests
- * carrying the same XFCC header), only one thread invokes the supplier -- the others wait briefly on
- * the bucket lock and receive the computed result -- avoiding a thundering-herd parse spike.
+ * carrying the same XFCC header), only one thread invokes the supplier -- the others wait on the
+ * bucket lock for that one parse (microseconds to tens of microseconds) and receive its result --
+ * avoiding a thundering-herd parse spike. The parse runs under that lock, so a different key that
+ * lands in the same hash bin waits for it as well.
  * This holds within a generation: if the generation rotates while a parse is still running, a later
  * request for the same key can start a second parse in the new generation. Both produce the same
  * result, so only the work is duplicated, and only when a generation's worth of other misses
@@ -194,8 +196,9 @@ public final class CertificateCache {
      * <p>Serialization is achieved by delegating the miss path to
      * {@link ConcurrentHashMap#computeIfAbsent(Object, java.util.function.Function)} on the current
      * generation. That call locks only the target bucket while the mapping function runs, so
-     * concurrent callers with different keys never block each other. Callers with the same key have
-     * at most one thread actually parse; the rest wait briefly and receive the computed result.
+     * concurrent callers with different keys block each other only when they share a hash bin.
+     * Callers with the same key have at most one thread actually parse; the rest wait for that
+     * parse and receive its result.
      *
      * <p>If {@code supplier} throws, the exception is propagated to the caller and no entry is
      * stored; the next request retries the parse.
