@@ -82,9 +82,10 @@ jobs:
             echo "::notice::main is at ${VERSION}, not a -SNAPSHOT: skipping the rolling snapshot release."
           fi
 
-      - name: Build
+      # Test and build in one invocation, so the published jar is the binary that passed the tests.
+      - name: Build and test
         if: steps.version.outputs.snapshot == 'true'
-        run: ./mvnw -q -Drevision="${{ steps.version.outputs.revision }}" package -DskipTests
+        run: ./mvnw -B -Drevision="${{ steps.version.outputs.revision }}" verify
 
       - name: Collect artifacts
         if: steps.version.outputs.snapshot == 'true'
