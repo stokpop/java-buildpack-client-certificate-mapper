@@ -42,19 +42,14 @@ import java.util.logging.Logger;
  * CF subject DN parsing, both of which showed up in profiler traces even after X.509 parsing was
  * already being cached.
  *
- * <p><b>Concurrent parse deduplication.</b> {@link #getOrCompute(String, ParsedXfccSupplier)} uses
- * {@link ConcurrentHashMap#computeIfAbsent(Object, java.util.function.Function)} to serialize the
- * miss path per key. When many threads race with the same cache-cold key (e.g. a burst of requests
- * carrying the same XFCC header), only one thread invokes the supplier -- the others wait on the
- * bucket lock for that one parse (microseconds to tens of microseconds) and receive its result --
- * avoiding a thundering-herd parse spike. The parse runs under that lock, so a different key that
- * lands in the same hash bin waits for it as well.
- * This holds within a generation: if the generation rotates while a parse is still running, a later
- * request for the same key can start a second parse in the new generation. Both produce the same
- * result, so only the work is duplicated, and only when a generation's worth of other misses
- * arrives during one parse.
- * Different keys never block each other. Prefer {@code getOrCompute} over the raw {@link #get} /
- * {@link #put} pair on hot paths.
+ * <p><b>Concurrent misses.</b> {@link #getOrCompute(String, ParsedXfccSupplier)} parses outside
+ * any map lock and publishes the result with {@link ConcurrentHashMap#putIfAbsent}. Threads that miss
+ * on the same cache-cold key at the same moment each parse it; the first result stored wins and
+ * every caller receives that one instance. The extra parses are the price of never holding a lock
+ * while parsing: {@code computeIfAbsent} would deduplicate them, but it runs the parse under the
+ * hash-bin lock, so a client that controls the header could pick values with colliding hash codes
+ * and have their misses parsed one at a time. Prefer {@code getOrCompute} over the raw
+ * {@link #get} / {@link #put} pair on hot paths.
  *
  * <p><b>Why the header value is the key.</b> Keys are the raw {@code X-Forwarded-Client-Cert}
  * entry exactly as received. Each request produces a fresh {@code String} from header parsing, so
@@ -105,9 +100,9 @@ import java.util.logging.Logger;
  * the reporting interval because it needs no timer and no clock reads on the request path.
  *
  * <p>Go through {@link #peek(String)} and {@link #getOrCompute(String, ParsedXfccSupplier)} on the
- * request path, so the implementation can be replaced without touching call sites and misses stay
- * deduplicated. {@link #get(String)} and {@link #put(String, ParsedXfcc)} remain for callers that
- * need the two halves separately, and give up that deduplication.
+ * request path, so the implementation can be replaced without touching call sites and every lookup
+ * is counted. {@link #get(String)} and {@link #put(String, ParsedXfcc)} remain for callers that need
+ * the two halves separately.
  */
 public final class CertificateCache {
 
@@ -130,8 +125,8 @@ public final class CertificateCache {
      * finds the current generation already full, which is rare relative to overall traffic.
      * Without this guard, multiple threads can observe the same full generation concurrently and
      * each perform a swap, cascading through several generations in quick succession: this
-     * discards entries other racing threads just added, can defeat the stampede-deduplication
-     * guarantee of {@link #getOrCompute}, and breaks the {@code 2 * maxGenSize} memory bound.
+     * discards entries other racing threads just added and breaks the {@code 2 * maxGenSize}
+     * memory bound.
      */
     private final Object rotationLock = new Object();
 
@@ -187,25 +182,16 @@ public final class CertificateCache {
     }
 
     /**
-     * Returns the cached bundle for {@code key}, invoking {@code supplier} once per key and
-     * generation on a miss even when many threads race with the same key (see the class
-     * documentation for the rotation case). This solves the cache-stampede
-     * ("thundering herd") case where a burst of concurrent requests carrying the same XFCC header
-     * would otherwise each parse the same certificate.
-     *
-     * <p>Serialization is achieved by delegating the miss path to
-     * {@link ConcurrentHashMap#computeIfAbsent(Object, java.util.function.Function)} on the current
-     * generation. That call locks only the target bucket while the mapping function runs, so
-     * concurrent callers with different keys block each other only when they share a hash bin.
-     * Callers with the same key have at most one thread actually parse; the rest wait for that
-     * parse and receive its result.
+     * Returns the cached bundle for {@code key}, invoking {@code supplier} on a miss. The supplier
+     * runs outside any lock; the result is published with {@code putIfAbsent}, so threads racing on
+     * the same cold key may each parse it, but all of them receive the one instance that was stored.
+     * Each call counts once: a hit when the value was already cached, a miss when this call parsed.
      *
      * <p>If {@code supplier} throws, the exception is propagated to the caller and no entry is
      * stored; the next request retries the parse.
      */
     public ParsedXfcc getOrCompute(String key, ParsedXfccSupplier supplier)
             throws CertificateException, IOException {
-        // Fast path: no lock, no wait for concurrent parsers.
         ParsedXfcc value = currentGen.get(key);
         if (value != null) {
             recordHit();
@@ -216,37 +202,11 @@ public final class CertificateCache {
             recordHit();
             return value;
         }
-        // Rotate before entering computeIfAbsent -- the mapping function must not mutate currentGen.
+        recordMiss();
+        ParsedXfcc parsed = supplier.parse();
         rotateIfFull();
-        // computeIfAbsent guarantees the mapping function runs at most once per key, but callers
-        // that lose the race still return through this same call without ever invoking it. Track
-        // whether *this* call was the one that parsed, so racing callers are still counted (as a
-        // hit, since they got the value without parsing) instead of silently missing both counters.
-        boolean[] parsed = {false};
-        try {
-            ParsedXfcc result = currentGen.computeIfAbsent(key, k -> {
-                parsed[0] = true;
-                recordMiss();
-                try {
-                    return supplier.parse();
-                } catch (CertificateException | IOException e) {
-                    throw new WrappedCheckedException(e);
-                }
-            });
-            if (!parsed[0]) {
-                recordHit();
-            }
-            return result;
-        } catch (WrappedCheckedException e) {
-            Throwable cause = e.getCause();
-            if (cause instanceof CertificateException) {
-                throw (CertificateException) cause;
-            }
-            if (cause instanceof IOException) {
-                throw (IOException) cause;
-            }
-            throw new RuntimeException(cause);
-        }
+        ParsedXfcc stored = currentGen.putIfAbsent(key, parsed);
+        return stored != null ? stored : parsed;
     }
 
     private void rotateIfFull() {
@@ -282,16 +242,6 @@ public final class CertificateCache {
     public interface ParsedXfccSupplier {
 
         ParsedXfcc parse() throws CertificateException, IOException;
-    }
-
-    /** Carries a checked exception out of {@link ConcurrentHashMap#computeIfAbsent}. */
-    private static final class WrappedCheckedException extends RuntimeException {
-
-        private static final long serialVersionUID = 1L;
-
-        WrappedCheckedException(Throwable cause) {
-            super(cause);
-        }
     }
 
     /** Returns the number of lookups that were served from the cache. */

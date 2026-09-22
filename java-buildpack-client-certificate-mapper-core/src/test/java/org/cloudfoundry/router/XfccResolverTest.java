@@ -368,7 +368,7 @@ public final class XfccResolverTest {
                     }));
                 }
                 for (Future<?> worker : workers) {
-                    worker.get();
+                    worker.get(2, TimeUnit.SECONDS);
                 }
             } finally {
                 pool.shutdownNow();
@@ -385,12 +385,13 @@ public final class XfccResolverTest {
 
     /**
      * {@code resolve} consults {@link CertificateCache#peek} (which records nothing on a miss) and
-     * then {@link CertificateCache#getOrCompute}. A thread whose peek misses but whose getOrCompute
-     * finds another thread's fresh entry counts a hit; the thread that parsed counts the one miss.
-     * Every call is counted exactly once, so the hit rate cannot exceed 100%.
+     * then {@link CertificateCache#getOrCompute}, which parses outside any lock. Threads racing on
+     * one cold header may each parse it, but every call is counted exactly once -- a miss if it
+     * parsed, a hit if it did not -- so the hit rate cannot exceed 100%, and all of them receive the
+     * one stored bundle.
      */
     @Test
-    public void concurrentResolvesOfOneHeaderCountEveryCallOnceAndParseOnce() throws Exception {
+    public void concurrentResolvesOfOneHeaderCountEveryCallOnce() throws Exception {
         CertificateCache cache = new CertificateCache(16);
         XfccResolver resolver = new XfccResolver(cache);
         String rawValue = "Hash=" + HASH + ";Cert=" + NGINX_ESCAPED_CERT;
@@ -407,14 +408,15 @@ public final class XfccResolverTest {
                 }));
             }
             start.countDown();
+            ParsedXfcc stored = results.get(0).get(2, TimeUnit.SECONDS);
             for (Future<ParsedXfcc> result : results) {
-                assertThat(result.get().certificate()).isNotNull();
+                assertThat(result.get(2, TimeUnit.SECONDS)).isSameAs(stored);
             }
         } finally {
             pool.shutdownNow();
         }
 
-        assertThat(cache.getMissCount()).isEqualTo(1);
+        assertThat(cache.getMissCount()).isPositive();
         assertThat(cache.getHitCount() + cache.getMissCount()).isEqualTo(threads);
     }
 
