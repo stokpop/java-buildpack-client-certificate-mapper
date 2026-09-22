@@ -58,7 +58,7 @@ import java.util.concurrent.TimeUnit;
  * the Envoy equivalent, with the certificate as URL-encoded PEM. {@code IDENTITY_ONLY} is the CF
  * app-identity header on an mTLS domain ({@code Hash=} and {@code Subject=} only): there is no
  * certificate to parse, so a hit saves only the field scan and the Subject DN parse, and on a miss
- * the cache key digest is added cost.
+ * the cache lookup, insert and generation bookkeeping are added cost.
  *
  * <p>{@code workingSet} is the number of distinct certificates in rotation. The cache holds two
  * generations of {@code cache.size} entries (128 by default, so ~256 certificates), which means a
